@@ -2,7 +2,7 @@
 # =============================================================================
 # CONFIG
 # =============================================================================
-SCRIPT_VERSION = "1.2.0"
+SCRIPT_VERSION = "1.2.1"
 SCRIPT_AUTHOR  = "Tony VARIN"
 TOOL_NAME      = "Mise a jour STR BIM Tools"
 # =============================================================================
@@ -120,7 +120,8 @@ try:
     </Window>"""
 
     # Depots GitHub de STR BIM Tools (extension principale + modules)
-    _MARQUE_DEPOT = "ameisen-killer/str-bim-tools"
+    # Compte renomme le 22.11.2026 : les postes installes avant gardent l'ancienne adresse
+    _MARQUES_DEPOT = ("str-bim-tools/str-bim-tools", "ameisen-killer/str-bim-tools")
     _NOMS_MODULES = {
         "str-bim-tools-extensions": u"STR BIM Tools",
         "str-bim-tools-can241":     u"CAN 241",
@@ -173,7 +174,8 @@ try:
         depots, vus = [], set()
         try:
             for ri in updater.get_thirdparty_ext_repos():
-                if _MARQUE_DEPOT in _url_origine(ri.repo):
+                url = _url_origine(ri.repo)
+                if any(m in url for m in _MARQUES_DEPOT):
                     depots.append(ri)
                     vus.add(os.path.normcase(os.path.normpath(ri.directory)))
         except Exception:
