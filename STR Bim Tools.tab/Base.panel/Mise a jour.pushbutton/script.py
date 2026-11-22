@@ -2,7 +2,7 @@
 # =============================================================================
 # CONFIG
 # =============================================================================
-SCRIPT_VERSION = "1.2.1"
+SCRIPT_VERSION = "1.2.2"
 SCRIPT_AUTHOR  = "Tony VARIN"
 TOOL_NAME      = "Mise a jour STR BIM Tools"
 # =============================================================================
@@ -208,14 +208,24 @@ try:
         filt.SortBy = libgit.libgit.CommitSortStrategies.Time
         return list(repo.Commits.QueryBy(filt))
 
-    def _a_modifs_locales(repo):
-        """Fichiers suivis modifies sur ce poste (les non suivis sont ignores)."""
+    def _modifs_locales(repo):
+        """Chemins des fichiers suivis modifies sur ce poste (les non suivis
+        sont ignores). Liste vide si rien, ou si git ne repond pas."""
         try:
             opts = libgit.libgit.StatusOptions()
             opts.IncludeUntracked = False
-            return repo.RetrieveStatus(opts).IsDirty
+            statut = repo.RetrieveStatus(opts)
+            if not statut.IsDirty:
+                return []
+            chemins = []
+            for entree in statut:
+                etat = str(entree.State)
+                if etat in ("Unaltered", "Ignored", "NewInWorkdir"):
+                    continue
+                chemins.append(u"{} ({})".format(entree.FilePath, etat))
+            return chemins or [u"(fichier non identifié)"]
         except Exception:
-            return False
+            return []
 
     def main():
         depots = _depots_str()
@@ -245,10 +255,14 @@ try:
                 if nouveaux:
                     a_jour.append(ri)
                     lignes.extend(CommitRow(module, c) for c in nouveaux)
-                if _a_modifs_locales(repo):
-                    alertes.append(u"{} : des fichiers ont été modifiés sur ce poste, la "
-                                   u"mise à jour peut échouer s'ils ont aussi changé sur "
-                                   u"GitHub.".format(module))
+                modifies = _modifs_locales(repo)
+                if modifies:
+                    cites = u", ".join(modifies[:3])
+                    if len(modifies) > 3:
+                        cites += u" (+{} autre(s))".format(len(modifies) - 3)
+                    alertes.append(u"{} : fichier(s) modifié(s) sur ce poste, la mise à "
+                                   u"jour peut échouer s'ils ont aussi changé sur GitHub : "
+                                   u"{}".format(module, cites))
                 div = libgit.compare_branch_heads(ri)
                 en_avance = (div.AheadBy or 0) if div is not None else 0
                 if en_avance:
