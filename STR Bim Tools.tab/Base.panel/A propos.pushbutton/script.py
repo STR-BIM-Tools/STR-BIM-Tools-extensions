@@ -2,13 +2,16 @@
 # =============================================================================
 # CONFIG
 # =============================================================================
-SCRIPT_VERSION = "1.1.0"
+SCRIPT_VERSION = "1.2.0"
 SCRIPT_AUTHOR  = "Tony VARIN"
 TOOL_NAME      = u"À propos"
 SITE           = u"www.str-bim-tools.com"
 # =============================================================================
 #  v1.1.0 - Fenetre reduite a l'embleme STR BIM Tools (logo.png) et au lien
 #           vers le site.
+#  v1.2.0 - Pied de page : version installee de la barre STR BIM Tools (date
+#           et repere du dernier changement recupere par la mise a jour), au
+#           lieu du numero de ce bouton.
 # =============================================================================
 
 import clr, traceback
@@ -43,6 +46,26 @@ try:
     from System.Windows.Media.Imaging import BitmapImage, BitmapCacheOption
 
     import str_ui as UI
+
+    # script.py > A propos.pushbutton > Base.panel > .tab > racine extension
+    EXT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(
+        os.path.dirname(os.path.abspath(__file__)))))
+
+    def _version_barre():
+        """Version installee de la barre : date et repere du commit en place,
+        lus dans le depot git de l'extension (rien n'est telecharge). None si
+        l'extension n'a pas ete installee depuis GitHub."""
+        try:
+            from pyrevit.coreutils import git as libgit
+            chemin = libgit.libgit.Repository.Discover(EXT_ROOT)
+            if not chemin:
+                return None
+            tip = libgit.get_repo(chemin).repo.Head.Tip
+            return u"Version du {0} ({1})".format(
+                tip.Author.When.LocalDateTime.ToString("dd.MM.yyyy"),
+                tip.Id.Sha[:7])
+        except Exception:
+            return None
 
     LOGO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "logo.png")
     TAILLE_LOGO = 300
@@ -109,6 +132,10 @@ try:
             root.Children.Add(corps)
 
             footer, sp_btns, grid_f = UI.make_footer(SCRIPT_VERSION)
+            version = _version_barre()
+            if version:
+                # Premier enfant de la grille du pied : le libelle de version
+                grid_f.Children[0].Text = version + u" | STR BIM Tools by Tony Varin"
             Grid.SetRow(footer, 1)
             root.Children.Add(footer)
             sp_btns.Children.Add(UI.footer_btn(u"Fermer", "fermer", 90,
