@@ -2,7 +2,7 @@
 # =============================================================================
 # CONFIG
 # =============================================================================
-SCRIPT_VERSION = "1.2.0"
+SCRIPT_VERSION = "1.3.0"
 SCRIPT_AUTHOR  = "Tony VARIN"
 TOOL_NAME      = u"À propos"
 SITE           = u"www.str-bim-tools.com"
@@ -12,6 +12,9 @@ SITE           = u"www.str-bim-tools.com"
 #  v1.2.0 - Pied de page : version installee de la barre STR BIM Tools (date
 #           et repere du dernier changement recupere par la mise a jour), au
 #           lieu du numero de ce bouton.
+#  v1.3.0 - Pied de page : numero de version du barre (nombre de changements
+#           publies, monte a chaque mise a jour) au lieu de la date, trop
+#           longue pour la fenetre.
 # =============================================================================
 
 import clr, traceback
@@ -52,18 +55,18 @@ try:
         os.path.dirname(os.path.abspath(__file__)))))
 
     def _version_barre():
-        """Version installee de la barre : date et repere du commit en place,
-        lus dans le depot git de l'extension (rien n'est telecharge). None si
-        l'extension n'a pas ete installee depuis GitHub."""
+        """Numero de version installe de la barre : nombre de commits du depot
+        git de l'extension (rien n'est telecharge). None si l'extension n'a
+        pas ete installee depuis GitHub."""
         try:
             from pyrevit.coreutils import git as libgit
             chemin = libgit.libgit.Repository.Discover(EXT_ROOT)
             if not chemin:
                 return None
-            tip = libgit.get_repo(chemin).repo.Head.Tip
-            return u"Version du {0} ({1})".format(
-                tip.Author.When.LocalDateTime.ToString("dd.MM.yyyy"),
-                tip.Id.Sha[:7])
+            depot = libgit.get_repo(chemin).repo
+            # Un changement publie = un commit : le numero monte a chaque
+            # mise a jour, sans rien a tenir a la main.
+            return u"v{0}".format(sum(1 for _c in depot.Commits))
         except Exception:
             return None
 
