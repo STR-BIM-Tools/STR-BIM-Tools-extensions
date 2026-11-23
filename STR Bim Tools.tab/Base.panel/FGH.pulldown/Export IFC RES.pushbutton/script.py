@@ -2,7 +2,7 @@
 # =============================================================================
 # CONFIG
 # =============================================================================
-SCRIPT_VERSION = "1.9.0"
+SCRIPT_VERSION = "1.9.1"
 SCRIPT_AUTHOR  = "Tony VARIN"
 TOOL_NAME      = "FGH - Export IFC RES"
 # =============================================================================
@@ -17,6 +17,8 @@ TOOL_NAME      = "FGH - Export IFC RES"
 # Lancer dans la maquette RES pour le premier, dans la maquette STR pour le
 # second. Une vue 3D temporaire filtre ce qui part : tout est annule apres
 # l'export, la maquette n'est pas modifiee. Voir lib/fgh_res.py.
+# 1.9.1 : l'ADN est aussi ecrit sous le nom CONTROL_NE_PAS_TOUCHER dans le jeu
+#         STR_FGH_RES (parametre commun avec un export IFC ordinaire).
 # 1.9.0 : deux cases filtrent les reservations selon PVA_RES_DEM_ResSTR
 #         (cochee / non cochee), compteurs mis a jour dans la fenetre.
 # =============================================================================

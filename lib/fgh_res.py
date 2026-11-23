@@ -217,7 +217,11 @@ def niveau(doc, el):
 
 def donnees(doc, el, export_du):
     """[(nom, valeur texte)] du jeu STR_FGH_RES d'une reservation."""
+    # L'ADN part sous deux noms : « Cle ADN » (lu par la page /fgh/) et le nom du parametre Revit
+    # (CONTROL_NE_PAS_TOUCHER), pour qu'un IFC de cet export se compare a un export IFC ordinaire de
+    # Revit sur ce parametre commun (comparaison de maquettes d'IFC Studio, demande du 23.11.2026).
     p = [(u"Cle ADN", adn(el)),
+         (ADN_PARAM, adn(el)),
          (u"Revit UniqueId", el.UniqueId),
          (u"Revit ElementId", u"{}".format(id_int(el.Id))),
          (u"Famille", famille(el)),
