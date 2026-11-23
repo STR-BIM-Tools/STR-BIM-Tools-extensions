@@ -2,7 +2,7 @@
 # =============================================================================
 # CONFIG
 # =============================================================================
-SCRIPT_VERSION = "3.9.0"
+SCRIPT_VERSION = "3.9.1"
 SCRIPT_AUTHOR  = "Tony VARIN"
 TOOL_NAME      = "Reservations RES vs STR"
 # =============================================================================
@@ -1182,15 +1182,20 @@ def _classify_row(row):
     if row.Statut == STATUT_INVALID and e_host is not None:
         return CAS_D
 
+    # Cas C : presente des deux cotes, validee et marquee supprimee dans la RES
+    # -> marquee supprimee dans la STR, que le reste (parametres de demande,
+    # validation, geometrie) differe ou non. Avant la 3.9.1 il fallait un autre
+    # ecart sur la ligne : une suppression seule restait « Identique ».
+    if e_host is not None and e_link is not None and _is_statut_valide(e_link) \
+            and _get_param_int(e_link, PARAM_SUPPRIME) == 1:
+        return CAS_C
+
     # Cas F : presente des deux cotes, position ou volumetrie differente (voyants
     # Pos. / Vol.) -> statut ATTENTION dans la STR, quel que soit le statut dans
     # la RES ; plus de remplacement automatique (decision Tony 20.11.2026).
-    # Passent avant : le refus ou le statut vide (Cas D, ci-dessus) et la
-    # suppression demandee par la RES sur une reservation validee (Cas C).
+    # Passent avant : le refus ou le statut vide (Cas D) et la suppression
+    # demandee par la RES sur une reservation validee (Cas C), ci-dessus.
     if e_host is not None and e_link is not None and (row.GeomPos or row.GeomVol):
-        if row.Statut == STATUT_DIFF and _is_statut_valide(e_link) \
-                and _get_param_int(e_link, PARAM_SUPPRIME) == 1:
-            return CAS_C
         if (_get_param_str(e_host, PARAM_VAL_STATUT) or u"").strip().upper() == STATUT_ATTENTION:
             return CAS_NONE
         return CAS_F
@@ -1219,8 +1224,7 @@ def _classify_row(row):
     if e_host is None:
         return CAS_NONE
     if supprime_lien == 1:
-        if valide:
-            return CAS_C
+        # Supprimee dans la RES sans etre validee (validee : Cas C, plus haut)
         return CAS_E if row.ValDiff else CAS_NONE
     # Cas B : position et volumetrie mesurees identiques -> tous les parametres
     # sont repris sur la reservation en place, sans suppression ni recopie, pour
@@ -1792,8 +1796,10 @@ def synchronize_reservations(rows, link_instance):
     Execute la synchronisation Cas A / B / C / D / E / F.
     Cas B : deja dans la STR, meme geometrie, parametres differents
             → tous les parametres repris sur place, sans copie ni suppression
+    Cas C : element present en local + valide et marque supprime dans le lien
+            → PVA_RES_VAL_Statut = SUPPRIMEE dans la STR
     Cas D : element present en local + validation retiree/refusee dans le lien
-            → marquer local Supprime=1 + vider PVA_RES_VAL_Statut
+            → PVA_RES_VAL_Statut = SUPPRIMEE dans la STR
     Cas E : meme reservation des deux cotes, validation differente
             → statut, date et commentaire VAL repris du lien
     Cas F : presente des deux cotes, position ou volumetrie differente

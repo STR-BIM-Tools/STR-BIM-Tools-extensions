@@ -229,7 +229,7 @@ L'outil identifie automatiquement quatre situations, chacune déclenchant une ac
 │  Statut de validation = VALIDE                                               │
 │    ├─ absent de la STR                              ──► CAS A (copier)      │
 │    ├─ présent + params ≠ + DEM_Modifie = 1          ──► CAS B (remplacer)   │
-│    └─ présent + params ≠ + DEM_Supprime = 1         ──► CAS C (marquer)     │
+│    └─ présent + DEM_Supprime = 1                    ──► CAS C (marquer)     │
 │                                                                              │
 │  Statut de validation ≠ VALIDE (REFUSE, vide, …)                            │
 │    └─ déjà présent dans la STR                      ──► CAS D (marquer)     │
@@ -250,7 +250,7 @@ L'outil identifie automatiquement quatre situations, chacune déclenchant une ac
 - **Action** : copie du nouvel élément depuis le lien + marquage de l'ancienne version dans la STR.
 
 ### Cas C — Annulés par le demandeur
-- **Condition** : numéro présent des deux côtés, statut VALIDE, paramètres divergents, et `PVA_RES_DEM_Supprime = 1` **côté lien**.
+- **Condition** : numéro présent des deux côtés, statut VALIDE et `PVA_RES_DEM_Supprime = 1` **côté lien**, que les autres paramètres ou la géométrie diffèrent ou non (depuis la v3.9.1 ; avant, une suppression seule restait sans action).
 - **Action** : aucune copie ; l'élément STR est marqué.
 - ⚠ Une réservation présente dans la STR mais **introuvable dans le lien** relève de `STR_SEUL`, pas du Cas C : elle n'est jamais synchronisable.
 
