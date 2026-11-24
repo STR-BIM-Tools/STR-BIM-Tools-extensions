@@ -2,7 +2,7 @@
 # =============================================================================
 # CONFIG
 # =============================================================================
-SCRIPT_VERSION = "3.11.0"
+SCRIPT_VERSION = "3.11.1"
 SCRIPT_AUTHOR  = "Tony VARIN"
 TOOL_NAME      = "Reservations RES vs STR"
 # =============================================================================
@@ -199,6 +199,7 @@ LBL_TOTAL_STAT  = u"Total lien : {}  |  Total hôte : {}"
 
 LBL_ABSENT_DET  = u"Non présente dans la maquette STR"
 LBL_STR_DET     = u"Présente dans STR mais absente du lien SPV"
+LBL_STR_JUMEAU  = u"ADN en double dans la STR : jumeau non comparé, à contrôler (outil « Doublons ADN »)"
 LBL_INVALID_DET = u"Validation retirée ou refusée — à supprimer de la STR"
 
 # En-tetes colonnes DataGrid
@@ -725,13 +726,15 @@ class ReservationRow(object):
 ADN_SEG_STATUT = u"STATUT"
 ADN_RE_REVISION = r"_R\d+$"
 
-_MATCH_REPORT = {"resoumissions": 0, "ambigus": [], "sans_adn_str": 0}
+_MATCH_REPORT = {"resoumissions": 0, "ambigus": [], "sans_adn_str": 0,
+                 "jumeaux_str": set()}
 
 
 def _reset_match_report():
     _MATCH_REPORT["resoumissions"] = 0
     _MATCH_REPORT["ambigus"]       = []
     _MATCH_REPORT["sans_adn_str"]  = 0
+    _MATCH_REPORT["jumeaux_str"]   = set()
 
 
 def _re_adn_revision():
@@ -838,6 +841,13 @@ def apparier(host_elems, link_elems):
     for e in host_elems:
         k = _adn_key(e)
         if k:
+            # ADN en double dans la STR : seul le dernier lu est compare. Avant
+            # la 3.11.1 l'autre disparaissait du tableau ; il est maintenant
+            # liste en « STR seul », avec un detail qui le dit.
+            precedent = host_by_adn.get(k)
+            if precedent is not None:
+                hosts_restants.append(precedent)
+                _MATCH_REPORT["jumeaux_str"].add(_eid_int(precedent.Id))
             host_by_adn[k] = e
         else:
             hosts_restants.append(e)
@@ -897,6 +907,9 @@ def _match_report_text():
     if r["resoumissions"]:
         lignes.append(u"Resoumissions détectées (ADN refigé, même N° et même "
                       u"maquette) : {}".format(r["resoumissions"]))
+    if r["jumeaux_str"]:
+        lignes.append(u"⚠ Réservations STR dont l'ADN est en double : {} jumeau(x) non "
+                      u"comparé(s), listé(s) en STR seul".format(len(r["jumeaux_str"])))
     if r["sans_adn_str"]:
         lignes.append(u"Réservations STR sans ADN : {} — jamais appariées, "
                       u"listées en STR seul".format(r["sans_adn_str"]))
@@ -1048,7 +1061,8 @@ def compare_reservations(host_elems, link_elems):
                 famille=_get_family_name(e_host),
                 niveau=_get_param_value_str(e_host, PARAM_NIVEAU),
                 statut=STATUT_STR_SEUL,
-                detail=LBL_STR_DET,
+                detail=(LBL_STR_JUMEAU if _eid_int(e_host.Id) in _MATCH_REPORT["jumeaux_str"]
+                        else LBL_STR_DET),
                 demandeur=_get_param_str(e_host, PARAM_DEMANDEUR) or "",
                 date_dem=_get_param_str(e_host, PARAM_DATE) or "",
                 val_statut="", val_date="", val_comment="",
@@ -1686,7 +1700,9 @@ def _mesure(element, transform):
 
 
 def _meme_geometrie(m_copie, m_source):
-    """Ecart (cm) si la copie a la position et l'encombrement de la source, sinon None."""
+    """Score d'ecart si la copie a la position, l'encombrement et le volume de la
+    source, sinon None. Le volume distingue deux formes superposees de meme
+    encombrement (un cercle et un carre de meme cote, 3.11.1)."""
     try:
         c = fgh_res_geom.comparer(m_copie, m_source)
     except Exception:
@@ -1695,7 +1711,16 @@ def _meme_geometrie(m_copie, m_source):
         return None
     if c["ecart"] > fgh_res_geom.TOL_POSITION_CM or c["ddim"] > fgh_res_geom.TOL_DIMENSION_CM:
         return None
-    return c["ecart"] + c["ddim"]
+    if abs(c["dvol"]) > fgh_res_geom.TOL_VOLUME_PCT:
+        return None
+    return c["ecart"] + c["ddim"] + abs(c["dvol"]) / 100.0
+
+
+def _famille_type(element):
+    try:
+        return (_get_family_name(element) or u"", _safe_name(element.Symbol) or u"")
+    except Exception:
+        return (u"", u"")
 
 
 def _cellule(m):
@@ -1703,13 +1728,15 @@ def _cellule(m):
                  for i in range(3))
 
 
-def _apparier_par_geometrie(m_sources, copies):
+def _apparier_par_geometrie(m_sources, copies, sources):
     """
     {indice source: indice copie} pour les paires dont la geometrie concorde.
     Les candidats sont pris du plus proche au moins proche ; une source ou une
     copie ne sert qu'une fois. Toute paire retenue est dans les tolerances, donc
     chaque copie recoit les parametres d'une reservation de meme position et de
-    meme encombrement, meme entre deux reservations superposees.
+    meme encombrement, meme entre deux reservations superposees. A geometrie
+    egale, la copie de meme famille et de meme type que la source passe d'abord
+    (la copie garde la famille du lien tant qu'elle n'est pas remappee).
     """
     m_copies, grille = {}, {}
     for j, e in enumerate(copies):
@@ -1719,10 +1746,12 @@ def _apparier_par_geometrie(m_sources, copies):
         m_copies[j] = m
         grille.setdefault(_cellule(m), []).append(j)
 
+    ft_copies = dict((j, _famille_type(copies[j])) for j in m_copies)
     candidats = []
     for i, ms in enumerate(m_sources):
         if ms is None:
             continue
+        ft_source = _famille_type(sources[i])
         cx, cy, cz = _cellule(ms)
         for dx in (-1, 0, 1):
             for dy in (-1, 0, 1):
@@ -1730,11 +1759,12 @@ def _apparier_par_geometrie(m_sources, copies):
                     for j in grille.get((cx + dx, cy + dy, cz + dz), ()):
                         score = _meme_geometrie(m_copies[j], ms)
                         if score is not None:
-                            candidats.append((score, i, j))
+                            autre = 0 if ft_copies[j] == ft_source else 1
+                            candidats.append((autre, score, i, j))
     candidats.sort()
 
     paires, prises = {}, set()
-    for _score, i, j in candidats:
+    for _autre, _score, i, j in candidats:
         if i in paires or j in prises:
             continue
         paires[i] = j
@@ -1798,7 +1828,7 @@ def _copy_elements_from_link(link_instance, elements):
               if e is not None and _est_reservation(e)]
     doc.Regenerate()
 
-    paires_idx = _apparier_par_geometrie(m_sources, copies)
+    paires_idx = _apparier_par_geometrie(m_sources, copies, elements)
     _COPY_REPORT["geometrie"] += len(paires_idx)
     pairs = [(elements[i], copies[j]) for i, j in sorted(paires_idx.items())]
 
