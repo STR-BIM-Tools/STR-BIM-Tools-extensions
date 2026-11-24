@@ -2,7 +2,7 @@
 # =============================================================================
 # CONFIG
 # =============================================================================
-SCRIPT_VERSION = "1.0.0"
+SCRIPT_VERSION = "1.1.0"
 SCRIPT_AUTHOR  = "Tony VARIN"
 TOOL_NAME      = "FGH - Doublons ADN"
 # =============================================================================
@@ -17,7 +17,12 @@ TOOL_NAME      = "FGH - Doublons ADN"
 #   - Meme position, geometrie differente : type ou encombrement different ;
 #   - Positions differentes : reservations distinctes qui partagent un ADN,
 #     la synchro en perd au moins une ;
-#   - les parametres qui different entre jumeaux (N°, statut VAL, supprime...).
+#   - les parametres qui different entre jumeaux (N°, statut VAL, supprime...) ;
+#   - le jumeau compare par la synchro (1.1.0, regle de Sync Reservations
+#     3.11.0) : dans la RES, la version vivante l'emporte sur l'ancienne marquee
+#     supprimee (doublon « resolu », cas d'une modification chez le mandataire) ;
+#     entre jumeaux de meme etat, le dernier lu (doublon « ambigu »). Seuls les
+#     doublons ambigus a positions differentes font perdre une reservation.
 #
 # Lancement :
 #   - dans la maquette RES (FGH_RES_SPV...) : analyse de la maquette ouverte ;
@@ -110,9 +115,13 @@ try:
     V_INCONN = u"Position indéterminée"
     GRAVITE  = {V_DIFF: 0, V_INCONN: 1, V_GEOM: 2, V_COPIE: 3}
 
-    F_TOUT, F_DIFF, F_GEOM, F_COPIE, F_PARAM, F_RES, F_STR = (
+    F_TOUT, F_DIFF, F_GEOM, F_COPIE, F_PARAM, F_AMB, F_RES, F_STR = (
         u"Tout afficher", V_DIFF, V_GEOM, V_COPIE, u"Paramètres divergents",
-        u"Maquette RES seulement", u"Maquette STR seulement")
+        u"Doublons ambigus", u"Maquette RES seulement", u"Maquette STR seulement")
+
+    SY_RETENUE  = u"Retenue"
+    SY_ANCIENNE = u"Ignorée (supprimée)"
+    SY_IGNOREE  = u"Ignorée"
 
     BG_DIFF  = "#FDDEDE"
     BG_GEOM  = "#FFF3CD"
@@ -273,7 +282,8 @@ try:
     def _stats_vides():
         return {"familles": 0, "sans_adn": 0, "sans_statut": 0, "mutualisees": 0,
                 "analysees": 0, "adn_dbl": 0, "objets": 0, "en_trop": 0,
-                "diff": 0, "geom": 0, "copie": 0, "param": 0}
+                "diff": 0, "geom": 0, "copie": 0, "param": 0,
+                "resolus": 0, "ambigus": 0, "perdues": 0}
 
     # =========================================================================
     # ANALYSE
@@ -281,7 +291,7 @@ try:
     class Row(object):
         """Une occurrence d'un ADN en doublon."""
         def __init__(self, src, el, adn, grp, rang, nb, ecart, verdict, ecarts_param,
-                     retenue, bg, link):
+                     synchro, resolu, bg, link):
             self.Source   = src
             self.Adn      = adn
             self.Groupe   = grp
@@ -298,7 +308,9 @@ try:
             self.UniqueId = el.UniqueId
             self.Verdict  = verdict
             self.Ecarts   = ecarts_param
-            self.Synchro  = u"Retenue" if retenue else u"Ignorée"
+            self.Synchro  = synchro
+            self.Resolu   = resolu
+            self.Doublon  = u"Résolu" if resolu else u"Ambigu"
             self.Ecart    = u"réf." if rang == 0 else (u"?" if ecart is None
                                                          else u"{:.1f}".format(ecart))
             info = parse_adn(adn)
@@ -379,10 +391,27 @@ try:
                 stats["param"] += 1
             txt_div = u", ".join(divergents)
 
-            # La synchro range par ADN dans un dict : le dernier lu ecrase les autres.
+            # Jumeau compare par la synchro (regle de Sync Reservations 3.11.0) :
+            # cote RES, l'unique version vivante si les autres sont supprimees ;
+            # sinon, et cote STR, le dernier lu.
+            vivants = [i for i, e in enumerate(groupe) if _p_int(e, PARAM_SUPPRIME) != 1]
+            resolu = src == SRC_RES and len(vivants) == 1
+            idx_ret = vivants[0] if resolu else len(groupe) - 1
+            if resolu:
+                stats["resolus"] += 1
+            else:
+                stats["ambigus"] += 1
+                if verdict == V_DIFF:
+                    stats["perdues"] += 1
             for i, e in enumerate(groupe):
+                if i == idx_ret:
+                    sy = SY_RETENUE
+                elif resolu:
+                    sy = SY_ANCIENNE
+                else:
+                    sy = SY_IGNOREE
                 rows.append(Row(src, e, adn, grp, i, len(groupe), ecarts[i], verdict,
-                                txt_div, i == len(groupe) - 1, bg, link))
+                                txt_div, sy, resolu, bg, link))
         return rows, grp
 
     # =========================================================================
@@ -391,7 +420,8 @@ try:
     COLS = [
         (u"Source", "Source", 9), (u"Groupe", "Groupe", 8), (u"Occurrence", "Occ", 11),
         (u"ADN", "Adn", 64), (u"Verdict groupe", "Verdict", 30),
-        (u"Paramètres divergents", "Ecarts", 28), (u"Synchro", "Synchro", 10),
+        (u"Paramètres divergents", "Ecarts", 28), (u"Doublon", "Doublon", 10),
+        (u"Synchro", "Synchro", 20),
         (u"Écart (cm)", "Ecart", 11), (u"Encombrement (cm)", "Dims", 18),
         (u"N° réservation", "Num", 16), (u"N° (ADN)", "NumAdn", 14),
         (u"Maquette d'origine", "MaqSR", 32), (u"Lecture ADN", "Parse", 16),
@@ -477,7 +507,7 @@ try:
         barre = StackPanel(); barre.Orientation = Orientation.Horizontal
         barre.Margin = Thickness(0, 8, 0, 0); col.Children.Add(barre)
         barre.Children.Add(str_ui.texte(u"Filtre :", marge=Thickness(0, 0, 6, 0)))
-        filtres = [F_TOUT, F_DIFF, F_GEOM, F_COPIE, F_PARAM]
+        filtres = [F_TOUT, F_DIFF, F_GEOM, F_COPIE, F_PARAM, F_AMB]
         if any(r.Source == SRC_STR for r in rows):
             filtres += [F_RES, F_STR]
         cb = str_ui.combo([(f, f) for f in filtres], 0, 240)
@@ -524,7 +554,8 @@ try:
         colonne(u"ADN", "Adn", 2, True, info="Adn")
         colonne(u"Verdict groupe", "Verdict", 200, gras=True)
         colonne(u"Paramètres divergents", "Ecarts", 150, info="Ecarts")
-        colonne(u"Synchro", "Synchro", 70)
+        colonne(u"Doublon", "Doublon", 62)
+        colonne(u"Synchro", "Synchro", 120)
         colonne(u"Écart (cm)", "Ecart", 72)
         colonne(u"Encombr. (cm)", "Dims", 95)
         colonne(u"N° réservation", "Num", 100)
@@ -543,6 +574,8 @@ try:
                 if f in (F_DIFF, F_GEOM, F_COPIE) and r.Verdict != f:
                     continue
                 if f == F_PARAM and not r.Ecarts:
+                    continue
+                if f == F_AMB and r.Resolu:
                     continue
                 if f == F_RES and r.Source != SRC_RES:
                     continue
@@ -639,9 +672,10 @@ try:
     # =========================================================================
     def _ligne_source(nom, s):
         return (u"{} : {} réservation(s) analysée(s) — {} ADN en doublon ({} objets, {} en trop) — "
-                u"{} à positions différentes, {} géométrie différente, {} copies superposées").format(
+                u"{} à positions différentes, {} géométrie différente, {} copies superposées — "
+                u"{} résolu(s), {} ambigu(s)").format(
                     nom, s["analysees"], s["adn_dbl"], s["objets"], s["en_trop"],
-                    s["diff"], s["geom"], s["copie"])
+                    s["diff"], s["geom"], s["copie"], s["resolus"], s["ambigus"])
 
     def main():
         lnk = None
@@ -681,18 +715,28 @@ try:
                 s_res["sans_adn"], s_res["sans_statut"], s_res["mutualisees"],
                 u"   |   STR : {} sans ADN".format(s_str["sans_adn"]) if s_str else u"",
                 TOL_POSITION_CM, TOL_DIM_CM), "texte_gris"))
-        perdues = s_res["diff"] + (s_str["diff"] if s_str else 0)
+        perdues = s_res["perdues"] + (s_str["perdues"] if s_str else 0)
         total_dbl = s_res["adn_dbl"] + (s_str["adn_dbl"] if s_str else 0)
+        total_amb = s_res["ambigus"] + (s_str["ambigus"] if s_str else 0)
+        if s_res["resolus"]:
+            resume_ui.append((
+                u"{} doublon(s) résolu(s) dans la RES : une seule version vivante, les autres "
+                u"marquées supprimées (modification chez le mandataire, ADN conservé). La synchro "
+                u"compare la version vivante et ignore les anciennes.".format(s_res["resolus"]),
+                "texte"))
         if perdues:
             resume_ui.append((
-                u"⚠ {} groupe(s) à positions différentes : réservations distinctes sous un même ADN, "
-                u"la synchro ne compare que celle marquée « Retenue » (dernière lue), les autres "
-                u"sont perdues.".format(perdues), "erreur"))
+                u"⚠ {} doublon(s) ambigu(s) à positions différentes : réservations distinctes sous "
+                u"un même ADN, la synchro ne compare que celle marquée « Retenue » (dernière lue), "
+                u"les autres sont perdues.".format(perdues), "erreur"))
+        elif total_amb:
+            resume_ui.append((
+                u"{} doublon(s) ambigu(s), tous superposés : un exemplaire par groupe est en trop ; "
+                u"vérifier les paramètres divergents avant de supprimer.".format(total_amb),
+                "avertissement"))
         elif total_dbl:
             resume_ui.append((
-                u"Aucun groupe à positions différentes : les doublons sont superposés. Un exemplaire "
-                u"par groupe est en trop ; vérifier les paramètres divergents avant de supprimer.",
-                "avertissement"))
+                u"Tous les doublons sont résolus : aucune réservation perdue par la synchro.", "ok"))
         else:
             resume_ui.append((u"Aucun ADN en double : chaque réservation est vue par la synchro.", "ok"))
 
@@ -721,12 +765,14 @@ try:
                 (u"{} — groupes même position, géométrie différente".format(nom), s["geom"]),
                 (u"{} — groupes copies superposées".format(nom), s["copie"]),
                 (u"{} — groupes aux paramètres divergents".format(nom), s["param"]),
+                (u"{} — doublons résolus (version vivante unique)".format(nom), s["resolus"]),
+                (u"{} — doublons ambigus".format(nom), s["ambigus"]),
                 (u"", u""),
             ]
         resume_xl += [(u"Tolérance de position (cm)", TOL_POSITION_CM),
                       (u"Tolérance d'encombrement (cm)", TOL_DIM_CM),
-                      (u"Réservations perdues par la synchro (groupes à positions différentes)",
-                       perdues)]
+                      (u"Réservations perdues par la synchro (doublons ambigus à positions "
+                       u"différentes)", perdues)]
 
         fenetre(rows, resume_ui, resume_xl).ShowDialog()
 

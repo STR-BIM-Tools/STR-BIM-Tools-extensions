@@ -2,7 +2,7 @@
 # =============================================================================
 # CONFIG
 # =============================================================================
-SCRIPT_VERSION = "1.0.2"
+SCRIPT_VERSION = "1.0.3"
 SCRIPT_AUTHOR  = "Tony VARIN"
 TOOL_NAME      = u"Contrôle Position Réservations"
 # =============================================================================
@@ -287,11 +287,21 @@ try:
         """
         rx = re.compile(ADN_RE_REVISION)
 
+        # Jumeaux d'ADN du lien : meme regle que Sync Reservations 3.11.0, la
+        # version vivante l'emporte sur l'ancienne marquee supprimee ; entre
+        # jumeaux de meme etat, le dernier lu (doublon ambigu).
         link_by_adn = {}
         for e in link_elems:
             k = _adn_key(e)
-            if k:
-                link_by_adn[k] = e
+            if not k:
+                continue
+            actuel = link_by_adn.get(k)
+            if actuel is not None:
+                sa = _p_int(actuel, PARAM_SUPPRIME) == 1
+                sc = _p_int(e, PARAM_SUPPRIME) == 1
+                if sc and not sa:
+                    continue
+            link_by_adn[k] = e
 
         host_by_adn, nb_str_seul = {}, 0
         for e in host_elems:

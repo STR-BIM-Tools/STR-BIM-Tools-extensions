@@ -2,7 +2,7 @@
 # =============================================================================
 # CONFIG
 # =============================================================================
-SCRIPT_VERSION = "3.10.0"
+SCRIPT_VERSION = "3.11.0"
 SCRIPT_AUTHOR  = "Tony VARIN"
 TOOL_NAME      = "Reservations RES vs STR"
 # =============================================================================
@@ -250,9 +250,11 @@ MSG_DOUBLONS = (
     u"⚠ Contrôle des identifiants de réservation\n\n"
     u"{}\n"
     u"L'appariement se fait sur l'ADN ({}), pas sur le N° : les N° en doublon ne "
-    u"sont donc plus perdus. En revanche, un ADN en doublon ou absent fait bien "
-    u"disparaître une réservation de la comparaison.\n\n"
-    u"Premiers identifiants concernés :\n{}"
+    u"sont donc plus perdus. Un ADN en doublon dans le lien est résolu quand une "
+    u"seule de ses réservations est vivante : c'est elle qui est comparée, les "
+    u"anciennes versions marquées supprimées sont ignorées. Un doublon ambigu, ou "
+    u"un ADN absent, fait bien disparaître une réservation de la comparaison.\n\n"
+    u"Premiers identifiants ambigus :\n{}"
 )
 
 MSG_VIEW3D_NONE   = (u"Aucune réservation à visualiser.\n\nSélectionne une ou plusieurs lignes "
@@ -764,6 +766,45 @@ def _fallback_key(element):
     return u"{}|{}".format(parts[0], maquette)
 
 
+# Jumeaux d'ADN dans le lien (3.11.0). La procedure VDC garde l'ADN quand le
+# mandataire modifie un percement, et le script VDC importe la version modifiee
+# a cote de l'ancienne, marquee PVA_RES_DEM_Supprime = 1 : deux objets de la RES
+# sous un meme ADN (constate le 24.11.2026 : 20 cas, tous de ce type). Jusqu'a
+# la 3.10.0, la synchro gardait le dernier lu, ordre que Revit ne garantit pas :
+# l'ancienne version pouvait l'emporter (Cas C a tort, nouvelle version jamais
+# copiee). Regle : la version vivante l'emporte sur la version supprimee ; entre
+# jumeaux de meme etat, rien ne permet de choisir, le doublon reste ambigu.
+def _est_supprime_lien(element):
+    return _get_param_int(element, PARAM_SUPPRIME) == 1
+
+
+def _garder_candidat(actuel, candidat):
+    """True si `candidat` doit remplacer `actuel` pour un meme ADN du lien."""
+    if actuel is None:
+        return True
+    sa, sc = _est_supprime_lien(actuel), _est_supprime_lien(candidat)
+    if sa != sc:
+        return sa          # le vivant remplace le supprime, jamais l'inverse
+    return True            # meme etat : dernier lu, comme avant (ambigu)
+
+
+def jumeaux_lien(elements):
+    """ADN en doublon du lien, repartis en (resolus, ambigus) selon la regle ci-dessus."""
+    groupes = {}
+    for e in elements:
+        k = _adn_key(e)
+        if k:
+            groupes.setdefault(k, []).append(e)
+    resolus, ambigus = [], []
+    for k in sorted(groupes):
+        g = groupes[k]
+        if len(g) < 2:
+            continue
+        vivants = [e for e in g if not _est_supprime_lien(e)]
+        (resolus if len(vivants) == 1 else ambigus).append(k)
+    return resolus, ambigus
+
+
 def audit_cles(elements):
     """ADN en doublon et elements sans ADN. Retourne (liste_doublons, nb_sans)."""
     counts, sans = {}, 0
@@ -789,7 +830,7 @@ def apparier(host_elems, link_elems):
     link_by_adn = {}
     for e in link_elems:
         k = _adn_key(e)
-        if k:
+        if k and _garder_candidat(link_by_adn.get(k), e):
             link_by_adn[k] = e
 
     host_by_adn  = {}
@@ -3239,13 +3280,16 @@ def run():
     # fait sur l'ADN : ce sont les ADN en doublon ou absents qui font disparaitre
     # une reservation, les N° en doublon ne sont plus qu'informatifs.
     dup_link, no_adn_link = audit_cles(link_elems)
+    dup_link_ok, dup_link_amb = jumeaux_lien(link_elems)
     dup_host, no_adn_host = audit_cles(host_elems)
     dup_num_link, _       = audit_numeros(link_elems)
     dup_num_host, _       = audit_numeros(host_elems)
     if dup_link or dup_host or no_adn_link or no_adn_host:
         lignes = []
         if dup_link:
-            lignes.append(u"  • Lien SPV : {} ADN en doublon".format(len(dup_link)))
+            lignes.append(u"  • Lien SPV : {} ADN en doublon — {} résolu(s) (version vivante "
+                          u"retenue, ancienne supprimée ignorée), {} ambigu(s)".format(
+                              len(dup_link), len(dup_link_ok), len(dup_link_amb)))
         if no_adn_link:
             lignes.append(u"  • Lien SPV : {} élément(s) sans ADN".format(no_adn_link))
         if dup_host:
@@ -3256,7 +3300,7 @@ def run():
             lignes.append(u"  • Pour information, N° en doublon — SPV : {} / STR : {} "
                           u"(sans conséquence sur l'appariement)".format(
                               len(dup_num_link), len(dup_num_host)))
-        apercu = u"\n".join(sorted(set(dup_link + dup_host))[:8]) or u"  (aucun)"
+        apercu = u"\n".join(sorted(set(dup_link_amb + dup_host))[:8]) or u"  (aucun)"
         forms.alert(MSG_DOUBLONS.format(u"\n".join(lignes), ADN_PARAM, apercu),
                     title=u"Contrôle des identifiants de réservation")
 

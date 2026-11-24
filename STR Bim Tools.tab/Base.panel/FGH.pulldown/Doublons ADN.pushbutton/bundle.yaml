@@ -1,5 +1,5 @@
 title: "Doublons\nADN"
 tooltip: "Repère les ADN (CONTROL_NE_PAS_TOUCHER) en double dans la maquette RES : copies superposées, réservations distinctes perdues par la synchro, jumeaux aux paramètres divergents."
 author: Tony VARIN
-version: 1.0.0
+version: 1.1.0
 min_revit_ver: 2024
