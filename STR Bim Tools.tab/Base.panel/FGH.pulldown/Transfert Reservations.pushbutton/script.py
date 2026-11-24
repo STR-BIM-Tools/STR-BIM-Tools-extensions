@@ -769,7 +769,7 @@ def _fallback_key(element):
 # Jumeaux d'ADN dans le lien (3.11.0). La procedure VDC garde l'ADN quand le
 # mandataire modifie un percement, et le script VDC importe la version modifiee
 # a cote de l'ancienne, marquee PVA_RES_DEM_Supprime = 1 : deux objets de la RES
-# sous un meme ADN (constate le 24.11.2026 : 20 cas, tous de ce type). Jusqu'a
+# sous un meme ADN (constate le 24.11.2026 : 18 cas sur 20 ADN en double). Jusqu'a
 # la 3.10.0, la synchro gardait le dernier lu, ordre que Revit ne garantit pas :
 # l'ancienne version pouvait l'emporter (Cas C a tort, nouvelle version jamais
 # copiee). Regle : la version vivante l'emporte sur la version supprimee ; entre
