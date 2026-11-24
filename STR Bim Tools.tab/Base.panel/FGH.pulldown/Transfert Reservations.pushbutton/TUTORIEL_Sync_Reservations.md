@@ -486,6 +486,8 @@ Les éléments déjà copiés dans le mauvais sous-projet doivent être déplac�
 
 **Ce qui se passe en v3.1.0** : l'appariement se fait par n° de réservation quand le paramètre a survécu à la copie, et ne retombe sur l'ordre positionnel que si aucun numéro n'est exploitable. L'ordre de retour de Revit n'a donc plus d'incidence.
 
+**Ce qui se passe en v3.10.0** : jusqu'à la v3.9.1, l'appariement tentait l'ADN puis le N°, mais retombait encore sur l'ordre de retour quand ni l'un ni l'autre ne suffisait (ADN ou N° en double dans le lot, paramètre perdu à la copie). Les anciennes versions ont ainsi laissé dans la STR des réservations portant l'ADN, le N° et le statut d'une autre réservation (« ADN croisés », nettoyés en novembre 2026). Désormais, chaque copie est rattachée à la réservation RES dont elle a la position et l'encombrement (tolérance 1 cm), sans lire aucun paramètre. Une copie sans source certaine est supprimée, et sa source est recopiée seule. Après l'écriture des paramètres, chaque copie est remesurée et tout écart est listé dans le message de fin. Il n'y a plus de repli sur l'ordre.
+
 **Solution complémentaire** : vérifier que la famille chargée dans la STR est **exactement la même version** que dans le SPV. Purger la famille STR et recharger depuis la source SPV.
 
 ---

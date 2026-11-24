@@ -2,7 +2,7 @@
 # =============================================================================
 # CONFIG
 # =============================================================================
-SCRIPT_VERSION = "3.9.1"
+SCRIPT_VERSION = "3.10.0"
 SCRIPT_AUTHOR  = "Tony VARIN"
 TOOL_NAME      = "Reservations RES vs STR"
 # =============================================================================
@@ -44,6 +44,7 @@ try:
     import System.Windows.Markup
     import System.Windows.Media
     import io
+    import math
     import os
     import re
 
@@ -1594,103 +1595,264 @@ def _remap_report_text():
     return u"\n".join(lignes)
 
 
-def _pair_sources_and_copies(sources, copied):
+# Copie depuis le lien : appariement source <-> copie par la GEOMETRIE (3.10.0).
+# Avant la 3.1.0, les parametres etaient reecrits dans l'ordre renvoye par
+# CopyElements, qui n'est pas garanti : une copie recevait l'ADN, le N° et le
+# statut d'une autre reservation (« ADN croises », nettoyes en novembre 2026).
+# Jusqu'a la 3.9.1, un repli positionnel subsistait quand ADN et N° ne
+# permettaient pas d'apparier. Desormais :
+#   1. chaque copie est rattachee a la source dont elle a la position et
+#      l'encombrement (tolerances de fgh_res_geom), sans lire aucun parametre ;
+#   2. une copie sans source certaine est supprimee, et sa source est recopiee
+#      seule (appariement certain par construction) ;
+#   3. apres l'ecriture des parametres, chaque copie est remesuree contre la
+#      source dont elle porte l'ADN ; un ecart est signale dans le compte rendu.
+_COPY_REPORT = {
+    "geometrie":     0,    # copies appariees par la geometrie
+    "unitaire":      0,    # sources recopiees une par une
+    "supprimees":    0,    # copies groupees sans source certaine, supprimees
+    "non_mesurees":  [],   # sources sans geometrie lisible (copie unitaire, non controlee)
+    "echecs":        [],   # sources qui n'ont pas pu etre copiees
+    "ecarts":        [],   # copies dont la geometrie finale differe de la source
+}
+
+_CELLULE_CM = 10.0   # maillage de recherche des voisins, > tolerance de position
+
+
+def _reset_copy_report():
+    _COPY_REPORT["geometrie"]    = 0
+    _COPY_REPORT["unitaire"]     = 0
+    _COPY_REPORT["supprimees"]   = 0
+    _COPY_REPORT["non_mesurees"] = []
+    _COPY_REPORT["echecs"]       = []
+    _COPY_REPORT["ecarts"]       = []
+
+
+def _num_lisible(element):
+    return _get_param_str(element, PARAM_NUM) or u"(sans n°)"
+
+
+def _est_reservation(element):
+    return isinstance(element, FamilyInstance) and \
+        (_get_family_name(element) or "").startswith(FAMILY_PREFIX)
+
+
+def _mesure(element, transform):
+    try:
+        return fgh_res_geom.mesurer(element, transform)
+    except Exception:
+        return None
+
+
+def _meme_geometrie(m_copie, m_source):
+    """Ecart (cm) si la copie a la position et l'encombrement de la source, sinon None."""
+    try:
+        c = fgh_res_geom.comparer(m_copie, m_source)
+    except Exception:
+        return None
+    if c is None:
+        return None
+    if c["ecart"] > fgh_res_geom.TOL_POSITION_CM or c["ddim"] > fgh_res_geom.TOL_DIMENSION_CM:
+        return None
+    return c["ecart"] + c["ddim"]
+
+
+def _cellule(m):
+    return tuple(int(math.floor(m["c"][i] * fgh_res_geom.PIED_CM / _CELLULE_CM))
+                 for i in range(3))
+
+
+def _apparier_par_geometrie(m_sources, copies):
     """
-    Apparie chaque element source a sa copie.
-    ElementTransformUtils.CopyElements ne garantit PAS que l'ordre des ids
-    retournes suit l'ordre des ids fournis : un appariement positionnel peut
-    donc ecrire les parametres d'une reservation sur une autre.
-    Strategie en trois temps : appariement par ADN s'il a survecu a la copie,
-    sinon par N° de reservation, sinon repli positionnel (cas ou aucun parametre
-    n'est preserve).
+    {indice source: indice copie} pour les paires dont la geometrie concorde.
+    Les candidats sont pris du plus proche au moins proche ; une source ou une
+    copie ne sert qu'une fois. Toute paire retenue est dans les tolerances, donc
+    chaque copie recoit les parametres d'une reservation de meme position et de
+    meme encombrement, meme entre deux reservations superposees.
     """
-    if len(sources) != len(copied):
-        return []
+    m_copies, grille = {}, {}
+    for j, e in enumerate(copies):
+        m = _mesure(e, None)
+        if m is None:
+            continue
+        m_copies[j] = m
+        grille.setdefault(_cellule(m), []).append(j)
 
-    def _essai(keyfunc):
-        src_by_key = {}
-        for s in sources:
-            k = keyfunc(s)
-            if k:
-                src_by_key[k] = s
-        if len(src_by_key) != len(sources):
-            return None
-        pairs, matched = [], set()
-        for dst in copied:
-            k = keyfunc(dst)
-            src = src_by_key.get(k)
-            if src is None or k in matched:
-                return None
-            matched.add(k)
-            pairs.append((src, dst))
-        return pairs if len(pairs) == len(sources) else None
+    candidats = []
+    for i, ms in enumerate(m_sources):
+        if ms is None:
+            continue
+        cx, cy, cz = _cellule(ms)
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for dz in (-1, 0, 1):
+                    for j in grille.get((cx + dx, cy + dy, cz + dz), ()):
+                        score = _meme_geometrie(m_copies[j], ms)
+                        if score is not None:
+                            candidats.append((score, i, j))
+    candidats.sort()
 
-    for keyfunc in (_adn_key, lambda e: _get_param_str(e, PARAM_NUM) or ""):
-        pairs = _essai(keyfunc)
-        if pairs:
-            return pairs
+    paires, prises = {}, set()
+    for _score, i, j in candidats:
+        if i in paires or j in prises:
+            continue
+        paires[i] = j
+        prises.add(j)
+    return paires
 
-    # Repli : ordre de retour suppose identique a l'ordre d'envoi
-    return list(zip(sources, copied))
+
+def _copier_une(linked_doc, source, transform, opts):
+    """Copie une seule reservation : la copie est sa propre paire. None si ambigu."""
+    ids = ClrList[ElementId]()
+    ids.Add(source.Id)
+    new_ids = ElementTransformUtils.CopyElements(linked_doc, ids, doc, transform, opts)
+    resas = [e for e in (doc.GetElement(n) for n in new_ids)
+             if e is not None and _est_reservation(e)]
+    return resas[0] if len(resas) == 1 else None
+
+
+def _ecrire_params_copie(src, dst, remappes):
+    if _eid_int(dst.Id) in remappes:
+        # Occurrence remappee : transfert integral, dimensions comprises.
+        _transfer_all_instance_params(src, dst)
+        return
+    for pname in _PARAMS_COPY:
+        try:
+            p_src = src.LookupParameter(pname)
+            p_dst = dst.LookupParameter(pname)
+            if not p_src or not p_dst or p_dst.IsReadOnly:
+                continue
+            st = p_src.StorageType
+            if st == StorageType.String:
+                p_dst.Set(p_src.AsString() or "")
+            elif st == StorageType.Double:
+                p_dst.Set(p_src.AsDouble())
+            elif st == StorageType.Integer:
+                p_dst.Set(p_src.AsInteger())
+        except Exception:
+            pass
 
 
 def _copy_elements_from_link(link_instance, elements):
     """
-    Copie une liste d'elements depuis le lien vers la maquette hote.
-    CopyElements entre documents ne preserve pas les parametres shared —
-    copie explicite apres la geometrie.
+    Copie une liste de reservations depuis le lien vers la maquette hote et
+    retourne les copies conservees, chacune appariee a sa source par la
+    geometrie (voir l'en-tete de section). CopyElements entre documents ne
+    preserve pas toujours les parametres partages : ils sont reecrits apres
+    la copie, sur la seule copie dont la geometrie est celle de la source.
     """
     if not elements:
         return []
     linked_doc = link_instance.GetLinkDocument()
     transform  = link_instance.GetTotalTransform()
     opts       = CopyPasteOptions()
-    ids        = ClrList[ElementId]()
+
+    m_sources = [_mesure(e, transform) for e in elements]
+
+    ids = ClrList[ElementId]()
     for e in elements:
         ids.Add(e.Id)
-    new_ids = ElementTransformUtils.CopyElements(
-        linked_doc, ids, doc, transform, opts
-    )
-    copied = []
-    for nid in new_ids:
-        e = doc.GetElement(nid)
-        if e:
-            copied.append(e)
+    new_ids = ElementTransformUtils.CopyElements(linked_doc, ids, doc, transform, opts)
+    copies = [e for e in (doc.GetElement(n) for n in new_ids)
+              if e is not None and _est_reservation(e)]
+    doc.Regenerate()
 
-    pairs = _pair_sources_and_copies(elements, copied)
+    paires_idx = _apparier_par_geometrie(m_sources, copies)
+    _COPY_REPORT["geometrie"] += len(paires_idx)
+    pairs = [(elements[i], copies[j]) for i, j in sorted(paires_idx.items())]
+
+    # Copies groupees sans source certaine : supprimees, jamais devinees.
+    utilisees = set(paires_idx.values())
+    for j, e in enumerate(copies):
+        if j in utilisees:
+            continue
+        try:
+            doc.Delete(e.Id)
+            _COPY_REPORT["supprimees"] += 1
+        except Exception:
+            pass
+
+    # Leurs sources sont recopiees une par une : appariement certain.
+    for i, src in enumerate(elements):
+        if i in paires_idx:
+            continue
+        motif = u"copie unitaire sans réservation unique en retour"
+        try:
+            dst = _copier_une(linked_doc, src, transform, opts)
+        except Exception as ex:
+            dst, motif = None, u"{}".format(ex)
+        if dst is None:
+            _COPY_REPORT["echecs"].append(u"N° {} : {}".format(_num_lisible(src), motif))
+            continue
+        _COPY_REPORT["unitaire"] += 1
+        if m_sources[i] is None:
+            _COPY_REPORT["non_mesurees"].append(_num_lisible(src))
+        pairs.append((src, dst))
 
     # Bascule sur les familles de reference AVANT la reecriture des parametres :
     # un changement de type remet les parametres d'occurrence aux valeurs par
     # defaut de la nouvelle famille, il faut donc ecrire apres.
     remappes, doublons = _remap_to_canonical(pairs)
-
     for src, dst in pairs:
-        if _eid_int(dst.Id) in remappes:
-            # Occurrence remappee : transfert integral, dimensions comprises.
-            _transfer_all_instance_params(src, dst)
-            continue
-        for pname in _PARAMS_COPY:
-            try:
-                p_src = src.LookupParameter(pname)
-                p_dst = dst.LookupParameter(pname)
-                if not p_src or not p_dst or p_dst.IsReadOnly:
-                    continue
-                st = p_src.StorageType
-                if st == StorageType.String:
-                    p_dst.Set(p_src.AsString() or "")
-                elif st == StorageType.Double:
-                    p_dst.Set(p_src.AsDouble())
-                elif st == StorageType.Integer:
-                    p_dst.Set(p_src.AsInteger())
-            except Exception:
-                pass
+        _ecrire_params_copie(src, dst, remappes)
 
     # La famille dupliquee n'a plus d'occurrence des lors que toutes ses copies
     # ont bascule : on la retire de la maquette.
     if doublons:
         _purge_familles_doublons(doublons)
 
-    return copied
+    # Controle final : chaque copie a-t-elle la geometrie de la reservation
+    # dont elle porte maintenant l'ADN ?
+    doc.Regenerate()
+    m_par_source = {}
+    for i, e in enumerate(elements):
+        m_par_source[_eid_int(e.Id)] = m_sources[i]
+    for src, dst in pairs:
+        ms = m_par_source.get(_eid_int(src.Id))
+        if ms is None:
+            continue
+        try:
+            c = fgh_res_geom.comparer(_mesure(dst, None), ms)
+        except Exception:
+            c = None
+        if c is None:
+            _COPY_REPORT["ecarts"].append(u"N° {} (Id {}) : copie non mesurable".format(
+                _num_lisible(src), _eid_int(dst.Id)))
+        elif c["deplacee"] or c["volumetrie"]:
+            _COPY_REPORT["ecarts"].append(
+                u"N° {} (Id {}) : écart {:.1f} cm, encombrement {:.1f} cm, volume {:+.1f} %".format(
+                    _num_lisible(src), _eid_int(dst.Id), c["ecart"], c["ddim"], c["dvol"]))
+
+    return [dst for _src, dst in pairs]
+
+
+def _copy_report_text():
+    """Bloc de compte rendu de la copie (Cas A), ajoute au message de fin."""
+    r = _COPY_REPORT
+    lignes = []
+    if r["geometrie"] or r["unitaire"]:
+        lignes.append(u"Copies rattachées à leur réservation RES : {} par la géométrie, "
+                      u"{} copiée(s) une par une".format(r["geometrie"], r["unitaire"]))
+    if r["supprimees"]:
+        lignes.append(u"Copies groupées sans source certaine, supprimées puis refaites "
+                      u"une par une : {}".format(r["supprimees"]))
+
+    def bloc(titre, items):
+        if not items:
+            return
+        lignes.append(u"")
+        lignes.append(titre)
+        for t in items[:15]:
+            lignes.append(u"   • {}".format(t))
+        if len(items) > 15:
+            lignes.append(u"   • ... et {} autre(s)".format(len(items) - 15))
+
+    bloc(u"⚠ Copies dont la géométrie finale diffère de la RES (à vérifier avec "
+         u"« Contrôle Position ») :", r["ecarts"])
+    bloc(u"⚠ Réservations RES sans géométrie lisible (copiées une par une, non "
+         u"contrôlées) :", [u"N° {}".format(n) for n in r["non_mesurees"]])
+    bloc(u"⚠ Réservations non copiées :", r["echecs"])
+    return u"\n".join(lignes)
 
 
 def _mark_as_new(elements):
@@ -1830,6 +1992,7 @@ def synchronize_reservations(rows, link_instance):
             cas_f_locals.append(row._host_elem)
 
     _reset_remap_report()
+    _reset_copy_report()
 
     nb_cas_a        = 0
     nb_cas_b        = 0
@@ -2931,6 +3094,10 @@ def build_and_show(rows, nb_absent, nb_diff, nb_ok, nb_str_seul, nb_invalid,
         match_txt = _match_report_text()
         if match_txt:
             result_msg += u"\n\n" + match_txt
+
+        copy_txt = _copy_report_text()
+        if copy_txt:
+            result_msg += u"\n\n" + copy_txt
 
         remap_txt = _remap_report_text()
         if remap_txt:
