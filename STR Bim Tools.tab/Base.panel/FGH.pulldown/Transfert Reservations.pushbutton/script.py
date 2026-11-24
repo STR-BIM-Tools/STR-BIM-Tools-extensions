@@ -2,7 +2,7 @@
 # =============================================================================
 # CONFIG
 # =============================================================================
-SCRIPT_VERSION = "3.12.0"
+SCRIPT_VERSION = "3.12.1"
 SCRIPT_AUTHOR  = "Tony VARIN"
 TOOL_NAME      = "Reservations RES vs STR"
 # =============================================================================
@@ -3307,7 +3307,9 @@ def build_and_show(rows, nb_absent, nb_diff, nb_ok, nb_str_seul, nb_invalid,
         try:
             lines = [LBL_CSV_HEADER]
             for r in export_rows:
-                lines.append(u";".join([u"{}"] * 24).format(
+                # Chaque champ sur une seule ligne et sans « ; » : un commentaire
+                # de validation a plusieurs lignes cassait la ligne du CSV (3.12.1)
+                champs = [
                     r.ValStatut, r.Statut, r.Num, r.Famille, r.Niveau,
                     r.Demandeur, r.DateDem,
                     r.ResDem,
@@ -3316,10 +3318,12 @@ def build_and_show(rows, nb_absent, nb_diff, nb_ok, nb_str_seul, nb_invalid,
                     u"Oui" if r.DemSupprime else u"Non",
                     r.ResResp,
                     r.ValDate, r.ValComment,
-                    r.Detail.replace(";", " /"),
+                    r.Detail,
                     r.Ecart, r.Action, r.SNum, r.SVal, r.SValDate,
-                    r.SValComment.replace(";", " /"), r.SId, r.GeomTexte, r.RId
-                ))
+                    r.SValComment, r.SId, r.GeomTexte, r.RId,
+                ]
+                lines.append(u";".join(
+                    u" ".join(u"{}".format(c).replace(u";", u" /").split()) for c in champs))
             with io.open(csv_path, 'w', encoding='utf-8-sig') as f:
                 f.write(u"\n".join(lines))
             _prefs_ecrire({"dossier_csv": os.path.dirname(csv_path)})
