@@ -2,7 +2,7 @@
 # =============================================================================
 # CONFIG
 # =============================================================================
-SCRIPT_VERSION = "1.0.0"
+SCRIPT_VERSION = "1.1.0"
 SCRIPT_AUTHOR  = "Tony VARIN"
 TOOL_NAME      = u"Purge Reservations Supprimees"
 # =============================================================================
@@ -30,6 +30,7 @@ import xlsxwriter
 from System.Collections.ObjectModel import ObservableCollection
 
 from pyrevit import revit, forms
+import fgh_percement
 from Autodesk.Revit.DB import (
     FilteredElementCollector,
     FamilyInstance,
@@ -116,6 +117,22 @@ MSG_PURGE_RESULT = (
     u"  {} élément(s) supprimé(s)\n"
     u"  {} échec(s)"
 )
+# Percements (1.1.0) : une reservation supprimee emporte son percement, sinon le
+# trou reste dans l'element traverse sans plus aucune reservation pour l'expliquer.
+MSG_CONFIRM_PERCEMENTS = (
+    u"\n\n{} de ces réservations ont un percement (outil « Percer Reservation ») : "
+    u"il sera retiré avec elles, les éléments traversés seront rebouchés et les "
+    u"bouchons de phase supprimés."
+)
+MSG_PURGE_PERCEMENTS = u"\n  {} percement(s) retiré(s) ({} élément(s) rebouché(s), {} bouchon(s) supprimé(s))"
+MSG_ORPHELINS = (
+    u"{} percement(s) n'ont plus de réservation dans la maquette (réservation "
+    u"supprimée à la main, par exemple) : le trou est resté dans l'élément traversé.\n\n"
+    u"Les retirer maintenant ? Les éléments traversés seront rebouchés."
+)
+MSG_ORPHELINS_OK = u"{} percement(s) sans réservation retiré(s) : {} élément(s) rebouché(s), {} bouchon(s) supprimé(s)."
+
+_PURGE_INFO = {"percements": 0, "hotes": 0, "bouchons": 0}
 MSG_PURGE_ERR      = u"Erreur lors de la suppression :\n\n{}"
 MSG_ALL_PURGED     = u"Toutes les réservations supprimées ont été purgées.\n\nFermeture de l'outil."
 MSG_VIEW3D_NONE    = u"Aucune réservation sélectionnée à visualiser."
@@ -402,11 +419,19 @@ def purge_reservations(elements):
     nb_ok     = 0
     nb_err    = 0
     err_lines = []
+    _PURGE_INFO["percements"] = _PURGE_INFO["hotes"] = _PURGE_INFO["bouchons"] = 0
 
     try:
         with revit.Transaction(u"STR - Purge Reservations Supprimees"):
+            index = fgh_percement.Index(doc)
             for e in elements:
                 try:
+                    # Le percement part avec sa reservation
+                    hotes, nb_b = fgh_percement.retirer(doc, e, index)
+                    if hotes or nb_b:
+                        _PURGE_INFO["percements"] += 1
+                        _PURGE_INFO["hotes"]      += len(hotes)
+                        _PURGE_INFO["bouchons"]   += nb_b
                     # Depingler si necessaire — prerequis a la suppression
                     if e.Pinned:
                         e.Pinned = False
@@ -672,8 +697,16 @@ def build_and_show(rows):
             return
 
         nb = len(selected_rows)
+        msg_confirm = MSG_CONFIRM_PURGE.format(nb)
+        try:
+            index = fgh_percement.Index(doc)
+            nb_perc = len([r for r in selected_rows if index.a_un_percement(r._element)])
+        except Exception:
+            nb_perc = 0
+        if nb_perc:
+            msg_confirm += MSG_CONFIRM_PERCEMENTS.format(nb_perc)
         confirmed = forms.alert(
-            MSG_CONFIRM_PURGE.format(nb),
+            msg_confirm,
             title=u"Confirmer la purge",
             yes=True, no=True
         )
@@ -685,6 +718,9 @@ def build_and_show(rows):
 
         # Affichage du resultat
         result_msg = MSG_PURGE_RESULT.format(nb_ok, nb_err)
+        if _PURGE_INFO["percements"]:
+            result_msg += MSG_PURGE_PERCEMENTS.format(
+                _PURGE_INFO["percements"], _PURGE_INFO["hotes"], _PURGE_INFO["bouchons"])
         if err_detail:
             result_msg += u"\n\nDétail des échecs :\n" + err_detail
         forms.alert(result_msg, title=u"Purge terminée")
@@ -776,7 +812,32 @@ def build_and_show(rows):
 # POINT D'ENTREE
 # =============================================================================
 
+def proposer_orphelins():
+    """Percements dont la reservation n'existe plus : propose de les retirer."""
+    try:
+        orphelins = fgh_percement.Index(doc).orphelins()
+    except Exception:
+        return
+    if not orphelins:
+        return
+    if not forms.alert(MSG_ORPHELINS.format(len(orphelins)),
+                       title=u"Percements sans réservation", yes=True, no=True):
+        return
+    nb_h = nb_b = 0
+    try:
+        with revit.Transaction(u"STR - Retrait percements sans reservation"):
+            for o in orphelins:
+                hotes, b = fgh_percement.retirer_objets(doc, o)
+                nb_h += len(hotes)
+                nb_b += b
+    except Exception:
+        forms.alert(MSG_PURGE_ERR.format(traceback.format_exc()), title=TOOL_NAME)
+        return
+    forms.alert(MSG_ORPHELINS_OK.format(len(orphelins), nb_h, nb_b), title=TOOL_NAME)
+
+
 def run():
+    proposer_orphelins()
     elements = collect_supprime_reservations()
     if not elements:
         forms.alert(MSG_NO_SUPPRIME, title=TOOL_NAME)

@@ -2,10 +2,16 @@
 # =============================================================================
 # CONFIG
 # =============================================================================
-SCRIPT_VERSION = "1.0.0"
+SCRIPT_VERSION = "1.1.0"
 SCRIPT_AUTHOR  = "Tony VARIN"
 TOOL_NAME      = "Percer Reservation"
 # =============================================================================
+# 1.1.0 : le percement (famille de coupe, occurrence, bouchons) est rattache a
+# l'ElementId de la reservation, plus a son N° (voir lib/fgh_percement.py). Le
+# N° existe en double et « Sync Reservations » le met a jour en place : percer
+# une reservation retirait le percement d'une autre de meme N°, ou ne retrouvait
+# plus le sien apres un changement de N°. Les percements crees par la 1.0.0 sont
+# repris quand leur reservation est certaine (position, ou N° unique).
 
 # Hors filet : strict minimum pour pouvoir afficher une erreur fatale
 import clr, traceback
@@ -55,6 +61,8 @@ try:
     except ImportError:
         USE_FORGE_UNITS = False
 
+    import fgh_percement
+
     uidoc = __revit__.ActiveUIDocument
     doc   = uidoc.Document
     app   = __revit__.Application
@@ -68,9 +76,8 @@ try:
     PARAM_NUM           = "PVA_RES_DEM_NumReservation"
     TARGET_WORKSET_NAME = "03_STR_RESERVATIONS"
 
-    CUTTER_FAM_PREFIX   = "STR_PERCEMENT_"          # famille de coupe generee
-    TAG_CUTTER          = "STR_PERCEMENT"           # tag Commentaires du cutter
-    TAG_BOUCHON         = "STR_BOUCHON"             # tag ApplicationDataId du bouchon
+    TAG_CUTTER          = fgh_percement.TAG_CUTTER   # tag Commentaires du cutter
+    TAG_BOUCHON         = fgh_percement.TAG_BOUCHON  # tag ApplicationDataId du bouchon
     APP_ID              = "STR_BIM_TOOLS"
 
     # Volume minimal d'intersection retenu (m3) : sous ce seuil = simple contact
@@ -365,100 +372,22 @@ try:
     # =========================================================================
     # GESTION DES ARTEFACTS CREES PAR L'OUTIL
     # =========================================================================
-    def cutter_family_name(num):
-        return CUTTER_FAM_PREFIX + _sanitize(num)
-
-    def find_cutter_family(num):
-        target = cutter_family_name(num)
+    def find_family_by_name(nom):
         for f in FilteredElementCollector(doc).OfClass(Family):
             try:
-                if f.Name == target:
+                if f.Name == nom:
                     return f
             except Exception:
                 pass
         return None
 
-    def find_cutter_instances(num):
-        fam = find_cutter_family(num)
-        if fam is None:
-            return []
-        wanted = set()
-        try:
-            for sid in fam.GetFamilySymbolIds():
-                wanted.add(_eid_int(sid))
-        except Exception:
-            pass
-        res = []
-        for fi in FilteredElementCollector(doc).OfClass(FamilyInstance).WhereElementIsNotElementType():
-            try:
-                if _eid_int(fi.GetTypeId()) in wanted:
-                    res.append(fi)
-            except Exception:
-                pass
-        return res
-
-    def find_bouchons(num):
-        """DirectShape bouchons de la reservation : tag dans ApplicationDataId."""
-        prefix = u"{}|{}|".format(TAG_BOUCHON, _sanitize(num))
-        res = []
-        for ds in FilteredElementCollector(doc).OfClass(DirectShape).WhereElementIsNotElementType():
-            try:
-                if (ds.ApplicationDataId or u"").startswith(prefix):
-                    res.append(ds)
-            except Exception:
-                pass
-        return res
-
-    def cleanup(num):
-        """Retire coupes, cutters, bouchons et famille de coupe de la reservation.
+    def cleanup(res):
+        """Retire coupes, cutters, bouchons et famille de coupe de la reservation,
+        y compris un percement cree par la 1.0.0 (cle N°) quand il lui revient.
 
         A appeler dans une transaction ouverte. Retourne (hotes_liberes, nb_bouchons).
         """
-        hosts_freed = []
-        for inst in find_cutter_instances(num):
-            try:
-                for hid in InstanceVoidCutUtils.GetElementsBeingCut(inst):
-                    host = doc.GetElement(hid)
-                    if host is None:
-                        continue
-                    try:
-                        InstanceVoidCutUtils.RemoveInstanceVoidCut(doc, host, inst)
-                        hosts_freed.append(host)
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-            try:
-                if inst.Pinned:
-                    inst.Pinned = False
-            except Exception:
-                pass
-            try:
-                doc.Delete(inst.Id)
-            except Exception:
-                pass
-
-        nb_b = 0
-        for ds in find_bouchons(num):
-            try:
-                if ds.Pinned:
-                    ds.Pinned = False
-            except Exception:
-                pass
-            try:
-                doc.Delete(ds.Id)
-                nb_b += 1
-            except Exception:
-                pass
-
-        fam = find_cutter_family(num)
-        if fam is not None:
-            try:
-                doc.Delete(fam.Id)
-            except Exception:
-                pass
-
-        return hosts_freed, nb_b
+        return fgh_percement.retirer(doc, res)
 
     # =========================================================================
     # FAMILLE DE COUPE GENEREE
@@ -536,7 +465,7 @@ try:
             pass
         return None
 
-    def build_cutter_family(num, solids, origin):
+    def build_cutter_family(res, solids, origin):
         """Cree et charge une famille de coupe (vides) et retourne son FamilySymbol.
 
         Les solides sont recentres sur origin : la famille contient la geometrie
@@ -554,7 +483,7 @@ try:
         if famdoc is None:
             raise Exception(u"Impossible de creer le document de famille depuis :\n" + tpl)
 
-        fam_name = cutter_family_name(num)
+        fam_name = fgh_percement.nom_famille(res)
         tmp_dir  = os.path.join(os.environ.get("TEMP", os.path.expanduser("~")), "STR_BimTools")
         try:
             if not os.path.isdir(tmp_dir):
@@ -642,7 +571,7 @@ try:
                 doc.LoadFamily(tmp_path)
             except Exception:
                 pass
-            fam = find_cutter_family(num)
+            fam = find_family_by_name(fam_name)
         if fam is None:
             raise Exception(u"Chargement de la famille de coupe impossible.")
 
@@ -794,7 +723,7 @@ try:
         _quiet(t)
         t.Start()
         try:
-            hosts_freed, _ = cleanup(num)
+            hosts_freed, _ = cleanup(res)
             deja = len(hosts_freed) > 0
             doc.Regenerate()
 
@@ -874,11 +803,11 @@ try:
             t1 = Transaction(doc, u"STR - Nettoyage percement")
             _quiet(t1)
             t1.Start()
-            cleanup(num)
+            cleanup(res)
             t1.Commit()
 
             # 2 - famille de coupe (hors transaction : LoadFamily ouvre la sienne)
-            sym = build_cutter_family(num, res_solids, origin)
+            sym = build_cutter_family(res, res_solids, origin)
 
             # 3 - placement, coupes et bouchons
             t2 = Transaction(doc, u"STR - Percement reservation")
@@ -902,10 +831,10 @@ try:
                 except Exception:
                     pass
 
-                _set_str(inst, BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS,
-                         u"{}|{}".format(TAG_CUTTER, num))
-                _set_str(inst, BuiltInParameter.ALL_MODEL_MARK,
-                         u"{}|{}".format(TAG_CUTTER, num))
+                # Le N° n'est la que pour la lecture : la cle est l'ElementId
+                tag_cutter = u"{}|{}|{}".format(TAG_CUTTER, num, fgh_percement.cle(res))
+                _set_str(inst, BuiltInParameter.ALL_MODEL_INSTANCE_COMMENTS, tag_cutter)
+                _set_str(inst, BuiltInParameter.ALL_MODEL_MARK, tag_cutter)
                 set_workset(inst, wsid)
 
                 for r in cibles:
@@ -930,8 +859,8 @@ try:
                             ds = DirectShape.CreateElement(
                                 doc, ElementId(BuiltInCategory.OST_GenericModel))
                             ds.ApplicationId     = APP_ID
-                            ds.ApplicationDataId = u"{}|{}|{}".format(
-                                TAG_BOUCHON, _sanitize(num), r.HostInt)
+                            ds.ApplicationDataId = u"{}{}".format(
+                                fgh_percement.prefixe_bouchon(res), r.HostInt)
                             ds.SetShape(shp)
                             try:
                                 ds.Name = _sanitize(u"STR_BOUCHON_{}".format(num))
@@ -990,13 +919,13 @@ try:
 
         return stats
 
-    def retirer(num):
+    def retirer(res, num):
         stats = {"hotes": 0, "bouchons": 0}
         t = Transaction(doc, u"STR - Retrait percement {}".format(num))
         _quiet(t)
         t.Start()
         try:
-            hosts, nb_b = cleanup(num)
+            hosts, nb_b = cleanup(res)
             stats["hotes"]    = len(hosts)
             stats["bouchons"] = nb_b
             t.Commit()
@@ -1291,7 +1220,7 @@ try:
             td.Show()
 
         elif act == "remove":
-            stats = retirer(num)
+            stats = retirer(res, num)
             TaskDialog.Show(TOOL_NAME,
                             u"Reservation n° {}\n\n"
                             u"{} element(s) libere(s)\n"

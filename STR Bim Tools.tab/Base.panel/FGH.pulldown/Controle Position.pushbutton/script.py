@@ -2,7 +2,7 @@
 # =============================================================================
 # CONFIG
 # =============================================================================
-SCRIPT_VERSION = "1.0.3"
+SCRIPT_VERSION = "1.1.0"
 SCRIPT_AUTHOR  = "Tony VARIN"
 TOOL_NAME      = u"Contrôle Position Réservations"
 # =============================================================================
@@ -58,6 +58,8 @@ try:
     )
 
     import xlsxwriter
+    import fgh_res_geom
+    import fgh_percement
 
     uidoc = __revit__.ActiveUIDocument
     doc   = uidoc.Document
@@ -277,12 +279,14 @@ try:
             return None
         return u"{}|{}".format(parts[0], rx.sub(u"", u"_".join(parts[i + 2:])))
 
-    def apparier(host_elems, link_elems):
+    def apparier(host_elems, link_elems, transform=None):
         """
         Meme regle que Sync Reservations :
           1. ADN identique ;
           2. repli resoumission : meme N° + maquette, une seule candidate de
-             chaque cote.
+             chaque cote, et geometries proches (fgh_res_geom.proches) : la
+             cle du repli n'est pas unique, deux reservations eloignees sont
+             tenues pour distinctes (1.1.0).
         Retourne ([(e_host, e_link, mode)], nb_lien_seul, nb_str_seul).
         """
         rx = re.compile(ADN_RE_REVISION)
@@ -335,6 +339,9 @@ try:
         for k in sorted(fb_link.keys()):
             cl, ch = fb_link[k], fb_host.get(k)
             if ch and len(cl) == 1 and len(ch) == 1:
+                if fgh_res_geom.proches(mesurer(ch[0], None),
+                                        mesurer(cl[0][1], transform)) is False:
+                    continue
                 paires.append((ch[0], cl[0][1], APP_RESOU))
                 pris_h.add(_eid_int(ch[0].Id))
                 pris_l.add(cl[0][0])
@@ -684,16 +691,22 @@ try:
             pass
         return vue, u""
 
+    _RECAL_INFO = {"percements": 0}
+
     def recaler(rows):
         """
         Translate les reservations STR sur la position du lien. Une seule
         transaction : un Ctrl+Z annule tout le recalage.
+        Le percement de la reservation (outil « Percer Reservation ») est
+        deplace du meme vecteur : sans cela le trou resterait a l'ancienne place.
         Retourne (nb_deplacees, [messages d'echec]).
         """
         echecs, faits = [], []
+        _RECAL_INFO["percements"] = 0
         t = Transaction(doc, u"STR - Recaler réservations sur le lien")
         t.Start()
         try:
+            index_perc = fgh_percement.Index(doc)
             for r in rows:
                 el = r._host
                 epingle = False
@@ -701,8 +714,16 @@ try:
                     epingle = el.Pinned
                     if epingle:
                         el.Pinned = False
-                    ElementTransformUtils.MoveElement(doc, el.Id, r.vecteur_recalage())
+                    vecteur = r.vecteur_recalage()
+                    ElementTransformUtils.MoveElement(doc, el.Id, vecteur)
                     faits.append(r)
+                    try:
+                        nb_o, nb_b = fgh_percement.deplacer(doc, el, vecteur, index_perc)
+                        if nb_o or nb_b:
+                            _RECAL_INFO["percements"] += 1
+                    except Exception as ex_p:
+                        echecs.append(u"{} : percement non déplacé ({})".format(
+                            r.Num or r.IdStr, ex_p))
                 except Exception as ex:
                     echecs.append(u"{} : {}".format(r.Num or r.IdStr, ex))
                 # Reepinglee meme si le deplacement a echoue
@@ -1111,6 +1132,11 @@ try:
             refresh()
             restent = len([r for r in cibles if r.Verdict != V_OK])
             bilan = u"{} réservation(s) déplacée(s).".format(nb)
+            if _RECAL_INFO["percements"]:
+                bilan += (u"\n\n{} d'entre elles étaient percées : le percement et ses bouchons "
+                          u"ont été déplacés avec elles. Si une réservation traverse maintenant "
+                          u"un autre élément, relancer « Percer Reservation » dessus.".format(
+                              _RECAL_INFO["percements"]))
             if restent:
                 bilan += (u"\n\n⚠ {} sont encore en écart après le déplacement (famille "
                           u"contrainte par son hôte ou son plan de travail ?) : elles "
@@ -1231,14 +1257,14 @@ try:
                                 _safe_name(lnk)))
             return
 
-        paires, nb_lien_seul, nb_str_seul = apparier(collect_host(), collect_link(ldoc))
+        transform = lnk.GetTotalTransform()
+        paires, nb_lien_seul, nb_str_seul = apparier(collect_host(), collect_link(ldoc), transform)
         if not paires:
             TaskDialog.Show(TOOL_NAME,
                             u"Aucune réservation présente à la fois dans la maquette STR et "
                             u"dans le lien : rien à contrôler.")
             return
 
-        transform = lnk.GetTotalTransform()
         rows = [Row(h, l, mode, transform) for h, l, mode in paires]
         run_window(rows, _safe_name(lnk), nb_lien_seul, nb_str_seul)
 

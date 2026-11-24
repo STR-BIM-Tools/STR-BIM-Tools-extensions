@@ -25,6 +25,12 @@ TOL_POSITION_CM = 1.0     # ecart entre centres de gravite
 TOL_DIMENSION_CM = 1.0    # ecart d'encombrement sur un axe
 TOL_VOLUME_PCT = 2.0      # ecart de volume
 
+# Repli « resoumission » (meme N° + meme maquette, ADN refige) : au-dela de cet
+# ecart entre centres, et sans chevauchement des encombrements, deux
+# reservations sont tenues pour distinctes. Le repli s'appuie sur une cle qui
+# n'est pas unique (155 collisions a l'audit du 13.08.2026).
+TOL_RESOUMISSION_CM = 100.0
+
 PIED_CM = 30.48
 PIED3_L = 28.316846592
 
@@ -129,6 +135,20 @@ def recouvrement(a, b):
         vb *= (b["mx"][i] - b["mn"][i])
     union = va + vb - inter
     return 100.0 * inter / union if union > 1.0e-12 else 0.0
+
+
+def proches(m_a, m_b, tol_cm=TOL_RESOUMISSION_CM):
+    """
+    Deux mesures peuvent-elles etre le meme percement resoumis ? Vrai si leurs
+    encombrements se chevauchent ou si leurs centres sont a moins de tol_cm.
+    None si l'une des deux mesures manque (rien ne permet de trancher).
+    """
+    if m_a is None or m_b is None:
+        return None
+    if recouvrement(m_a, m_b) > 0.0:
+        return True
+    d = [(m_a["c"][i] - m_b["c"][i]) * PIED_CM for i in range(3)]
+    return math.sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) <= tol_cm
 
 
 def comparer(m_str, m_res, tol_pos=TOL_POSITION_CM, tol_dim=TOL_DIMENSION_CM,

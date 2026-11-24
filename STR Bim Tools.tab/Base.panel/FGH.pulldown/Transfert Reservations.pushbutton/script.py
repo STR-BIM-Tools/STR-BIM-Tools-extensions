@@ -2,7 +2,7 @@
 # =============================================================================
 # CONFIG
 # =============================================================================
-SCRIPT_VERSION = "3.11.1"
+SCRIPT_VERSION = "3.12.0"
 SCRIPT_AUTHOR  = "Tony VARIN"
 TOOL_NAME      = "Reservations RES vs STR"
 # =============================================================================
@@ -163,10 +163,11 @@ ACTION_LABELS = {
     "D": u"Marquer supprimée",
     "E": u"Reprendre la validation",
     "F": u"Passer en ATTENTION",
+    "G": u"Remplacer par la version RES",
 }
 ACTION_COULEURS = {"A": "#DFF0D8", "B": "#FFF3CD", "C": "#FFD9A0",
-                   "D": "#FFD9A0", "E": "#D6EAF8", "F": "#F8C9C4"}
-LBL_SANS_ACTION_ATT = u"Aucune (déjà ATTENTION)"
+                   "D": "#FFD9A0", "E": "#D6EAF8", "F": "#F8C9C4", "G": "#E8DAEF"}
+LBL_SANS_ACTION_ATT = u"Aucune (déjà ATTENTION, non validée dans la RES)"
 LBL_SANS_ACTION_GEO = u"Aucune (géométrie non mesurable)"
 LBL_SANS_ACTION_NV  = u"Aucune (non validée)"
 LBL_SANS_ACTION_SUP = u"Aucune (supprimée dans la RES)"
@@ -304,6 +305,17 @@ MSG_SYNC_RESULT = (
     u"  Cas E - Statuts VAL repris           : {}\n"
     u"  Cas F - Passés en ATTENTION          : {}\n\n"
     u"Total copiés : {}  |  Total marqués supprimés : {}"
+)
+MSG_CONFIRM_G = (
+    u"⚠ Cas G - Remplacement : {} réservation(s) en ATTENTION que vous avez cochée(s). "
+    u"La version de la maquette RES est copiée dans la STR, et l'ancienne copie est "
+    u"marquée SUPPRIMEE (cotes et percement compris : « Purge Reservations » la retire "
+    u"ensuite avec son percement, la nouvelle est à repercer).\n"
+)
+MSG_RESULT_G = (
+    u"  Cas G - Remplacées                   : {} sur {} cochée(s)\n"
+    u"  Anciennes copies marquées SUPPRIMEE : lancer « Purge Reservations » pour les "
+    u"retirer avec leur percement, puis « Percer Reservation » sur les nouvelles."
 )
 MSG_SYNC_ERR    = u"Erreur lors de la synchronisation :\n\n{}"
 MSG_NOTHING     = u"Aucun élément à synchroniser dans la sélection (ABSENT, DIFFERENT, INVALIDE, STATUT VAL ou écart de géométrie attendus)."
@@ -727,7 +739,7 @@ ADN_SEG_STATUT = u"STATUT"
 ADN_RE_REVISION = r"_R\d+$"
 
 _MATCH_REPORT = {"resoumissions": 0, "ambigus": [], "sans_adn_str": 0,
-                 "jumeaux_str": set()}
+                 "jumeaux_str": set(), "ecartees": []}
 
 
 def _reset_match_report():
@@ -735,6 +747,7 @@ def _reset_match_report():
     _MATCH_REPORT["ambigus"]       = []
     _MATCH_REPORT["sans_adn_str"]  = 0
     _MATCH_REPORT["jumeaux_str"]   = set()
+    _MATCH_REPORT["ecartees"]      = []
 
 
 def _re_adn_revision():
@@ -820,6 +833,25 @@ def audit_cles(elements):
     return sorted([k for k in counts if counts[k] > 1]), sans
 
 
+def _resoumission_plausible(e_host, e_link):
+    """
+    Le repli N° + maquette n'est pas une identite (155 collisions a l'audit du
+    13.08.2026) : il pouvait apparier deux reservations sans rapport, puis
+    proposer de marquer supprimee (Cas D) ou de passer en ATTENTION une
+    reservation STR a la place d'une autre. Depuis la 3.12.0 la paire n'est
+    retenue que si les deux geometries sont proches (fgh_res_geom.proches).
+    Retourne False si elles sont mesurees et eloignees, True ou None sinon.
+    """
+    try:
+        cle = _eid_int(e_link.Id)
+        cache = _GEOM_CTX["cache"]
+        if cle not in cache:
+            cache[cle] = fgh_res_geom.mesurer(e_link, _GEOM_CTX["transform"])
+        return fgh_res_geom.proches(fgh_res_geom.mesurer(e_host, None), cache[cle])
+    except Exception:
+        return None
+
+
 def apparier(host_elems, link_elems):
     """
     Apparie les reservations du lien et de la STR.
@@ -884,6 +916,9 @@ def apparier(host_elems, link_elems):
             continue
         candidats_l = fb_link[k]
         if len(candidats_l) == 1 and len(candidats_h) == 1:
+            if _resoumission_plausible(candidats_h[0], candidats_l[0][1]) is False:
+                _MATCH_REPORT["ecartees"].append(k)
+                continue
             adn = candidats_l[0][0]
             paires[adn] = candidats_h[0]
             utilises.add(_eid_int(candidats_h[0].Id))
@@ -907,6 +942,10 @@ def _match_report_text():
     if r["resoumissions"]:
         lignes.append(u"Resoumissions détectées (ADN refigé, même N° et même "
                       u"maquette) : {}".format(r["resoumissions"]))
+    if r["ecartees"]:
+        lignes.append(u"Resoumissions écartées (même N° et même maquette, mais réservations "
+                      u"éloignées de plus de {:.0f} cm) : {} — traitées comme des réservations "
+                      u"distinctes".format(fgh_res_geom.TOL_RESOUMISSION_CM, len(r["ecartees"])))
     if r["jumeaux_str"]:
         lignes.append(u"⚠ Réservations STR dont l'ADN est en double : {} jumeau(x) non "
                       u"comparé(s), listé(s) en STR seul".format(len(r["jumeaux_str"])))
@@ -1179,7 +1218,8 @@ def _finaliser_row(row):
     _mesurer_geometrie(row)
     cas = _classify_row(row)
     row.IsSelectable = cas is not None
-    row.IsSelected   = cas is not None
+    row.IsSelected   = cas is not None and cas != CAS_G
+    row.CocheManuelle = cas == CAS_G
     if cas is not None:
         row.Action = ACTION_LABELS[cas]
         row.RowBg  = ACTION_COULEURS[cas]
@@ -1220,6 +1260,7 @@ CAS_C = "C"   # marquer local supprime (annulation demandeur)
 CAS_D = "D"   # validation retiree/refusee apres integration
 CAS_E = "E"   # reprise du statut, de la date et du commentaire de validation
 CAS_F = "F"   # geometrie ou position differente : statut ATTENTION dans la STR
+CAS_G = "G"   # deja ATTENTION, validee dans la RES : remplacement, coche a la main
 CAS_NONE = None   # ligne non actionnable
 
 
@@ -1253,6 +1294,12 @@ def _classify_row(row):
     # demandee par la RES sur une reservation validee (Cas C), ci-dessus.
     if e_host is not None and e_link is not None and (row.GeomPos or row.GeomVol):
         if (_get_param_str(e_host, PARAM_VAL_STATUT) or u"").strip().upper() == STATUT_ATTENTION:
+            # Cas G (3.12.0) : la reservation est deja en ATTENTION et la version
+            # de la RES est validee -> remplacement propose, jamais coche d'office :
+            # la version RES est copiee, l'ancienne copie STR est marquee supprimee
+            # (« Purge Reservations » la retire ensuite, avec son percement).
+            if _is_statut_valide(e_link) and _get_param_int(e_link, PARAM_SUPPRIME) != 1:
+                return CAS_G
             return CAS_NONE
         return CAS_F
 
@@ -1666,6 +1713,7 @@ _COPY_REPORT = {
     "geometrie":     0,    # copies appariees par la geometrie
     "unitaire":      0,    # sources recopiees une par une
     "supprimees":    0,    # copies groupees sans source certaine, supprimees
+    "sources_ok":    set(),  # ElementId (int) des sources effectivement copiees
     "non_mesurees":  [],   # sources sans geometrie lisible (copie unitaire, non controlee)
     "echecs":        [],   # sources qui n'ont pas pu etre copiees
     "ecarts":        [],   # copies dont la geometrie finale differe de la source
@@ -1678,6 +1726,7 @@ def _reset_copy_report():
     _COPY_REPORT["geometrie"]    = 0
     _COPY_REPORT["unitaire"]     = 0
     _COPY_REPORT["supprimees"]   = 0
+    _COPY_REPORT["sources_ok"]   = set()
     _COPY_REPORT["non_mesurees"] = []
     _COPY_REPORT["echecs"]       = []
     _COPY_REPORT["ecarts"]       = []
@@ -1894,6 +1943,8 @@ def _copy_elements_from_link(link_instance, elements):
                 u"N° {} (Id {}) : écart {:.1f} cm, encombrement {:.1f} cm, volume {:+.1f} %".format(
                     _num_lisible(src), _eid_int(dst.Id), c["ecart"], c["ddim"], c["dvol"]))
 
+    for src, _dst in pairs:
+        _COPY_REPORT["sources_ok"].add(_eid_int(src.Id))
     return [dst for _src, dst in pairs]
 
 
@@ -1933,14 +1984,14 @@ def _mark_as_new(elements):
         _set_param_value(e, PARAM_MODIFIE, 0)
 
 
-def _mark_as_deleted(elements):
+def _mark_as_deleted(elements, libelle=u"Supprimé le : {}"):
     """
     Cas C, Cas D : marque l'element STR comme supprime.
     Ecrit 'SUPPRIMEE' dans PVA_RES_VAL_Statut — c'est ce statut que
     collect_host_reservations() utilise pour exclure ces elements a la prochaine synchro.
     Ecrit aussi la date dans PVA_RES_DEM_Commentaire pour la tracabilite.
     """
-    comment = u"Supprimé le : {}".format(
+    comment = libelle.format(
         System.DateTime.Now.ToString("dd/MM/yyyy")
     )
     count = 0
@@ -2024,6 +2075,9 @@ def _pin_elements(elements):
             pass
 
 
+_SYNC_EXTRA = {"g": 0}   # Cas G : hors du tuple de retour, pour ne pas le changer
+
+
 def synchronize_reservations(rows, link_instance):
     """
     Execute la synchronisation Cas A / B / C / D / E / F.
@@ -2037,6 +2091,9 @@ def synchronize_reservations(rows, link_instance):
             → statut, date et commentaire VAL repris du lien
     Cas F : presente des deux cotes, position ou volumetrie differente
             → statut ATTENTION dans la STR
+    Cas G : deja en ATTENTION, validee dans la RES, cochee a la main
+            → version RES copiee, ancienne copie STR marquee SUPPRIMEE
+              (compte dans _SYNC_EXTRA["g"])
     Retourne (nb_cas_a, nb_cas_b, nb_cas_c, nb_cas_d,
               nb_cas_e, nb_cas_f, workset_not_found, erreur_str)
     """
@@ -2046,6 +2103,8 @@ def synchronize_reservations(rows, link_instance):
     cas_d_locals     = []
     cas_e_pairs      = []
     cas_f_locals     = []
+    cas_g_pairs      = []
+    _SYNC_EXTRA["g"] = 0
 
     for row in rows:
         cas = _classify_row(row)
@@ -2061,6 +2120,8 @@ def synchronize_reservations(rows, link_instance):
             cas_e_pairs.append((row._host_elem, row._link_elem))
         elif cas == CAS_F:
             cas_f_locals.append(row._host_elem)
+        elif cas == CAS_G:
+            cas_g_pairs.append((row._host_elem, row._link_elem))
 
     _reset_remap_report()
     _reset_copy_report()
@@ -2073,7 +2134,7 @@ def synchronize_reservations(rows, link_instance):
     nb_cas_f        = 0
 
     workset_id         = _find_workset_id(TARGET_WORKSET_NAME)
-    workset_not_found  = (workset_id is None) and (len(cas_a_sources) > 0)
+    workset_not_found  = (workset_id is None) and (len(cas_a_sources) + len(cas_g_pairs) > 0)
 
     try:
         if cas_a_sources:
@@ -2104,6 +2165,19 @@ def synchronize_reservations(rows, link_instance):
         if cas_f_locals:
             with revit.Transaction(u"STR - Sync Reservations Cas F"):
                 nb_cas_f = _mark_attention(cas_f_locals)
+
+        if cas_g_pairs:
+            with revit.Transaction(u"STR - Sync Reservations Cas G"):
+                copied_g = _copy_elements_from_link(
+                    link_instance, [e_link for _h, e_link in cas_g_pairs])
+                _mark_as_new(copied_g)
+                _pin_elements(copied_g)
+                if workset_id is not None:
+                    _assign_to_workset(copied_g, workset_id)
+                # L'ancienne copie n'est marquee que si sa remplacante est bien la
+                ok = _COPY_REPORT["sources_ok"]
+                anciens = [h for h, e_link in cas_g_pairs if _eid_int(e_link.Id) in ok]
+                _SYNC_EXTRA["g"] = _mark_as_deleted(anciens, u"Remplacée le : {}")
 
     except Exception:
         return (nb_cas_a, nb_cas_b, nb_cas_c, nb_cas_d,
@@ -3086,8 +3160,9 @@ def build_and_show(rows, nb_absent, nb_diff, nb_ok, nb_str_seul, nb_invalid,
         return state["rows"] if view is None else view
 
     def on_check_all(s, e):
+        # Les remplacements (Cas G) ne se cochent qu'un par un, a la main
         for r in _current_view():
-            if r.IsSelectable:
+            if r.IsSelectable and not getattr(r, "CocheManuelle", False):
                 r.IsSelected = True
         _refresh_view()
 
@@ -3114,7 +3189,7 @@ def build_and_show(rows, nb_absent, nb_diff, nb_ok, nb_str_seul, nb_invalid,
             return
 
         # Preview : utilise la meme fonction de classification que la synchro reelle
-        nb_a = nb_b = nb_c = nb_d = nb_e = nb_f = 0
+        nb_a = nb_b = nb_c = nb_d = nb_e = nb_f = nb_g = 0
         for row in selected:
             cas = _classify_row(row)
             if cas == CAS_A:
@@ -3129,8 +3204,10 @@ def build_and_show(rows, nb_absent, nb_diff, nb_ok, nb_str_seul, nb_invalid,
                 nb_e += 1
             elif cas == CAS_F:
                 nb_f += 1
+            elif cas == CAS_G:
+                nb_g += 1
 
-        total_preview = nb_a + nb_b + nb_c + nb_d + nb_e + nb_f
+        total_preview = nb_a + nb_b + nb_c + nb_d + nb_e + nb_f + nb_g
         if total_preview == 0:
             forms.alert(
                 u"Aucun élément à traiter parmi la sélection.",
@@ -3138,8 +3215,11 @@ def build_and_show(rows, nb_absent, nb_diff, nb_ok, nb_str_seul, nb_invalid,
             )
             return
 
+        msg_confirm = MSG_CONFIRM_SYNC.format(total_preview, nb_a, nb_b, nb_c, nb_d, nb_e, nb_f)
+        if nb_g:
+            msg_confirm = msg_confirm.replace(u"Confirmer ?", MSG_CONFIRM_G.format(nb_g) + u"Confirmer ?")
         confirmed = forms.alert(
-            MSG_CONFIRM_SYNC.format(total_preview, nb_a, nb_b, nb_c, nb_d, nb_e, nb_f),
+            msg_confirm,
             title="Confirmer la synchronisation",
             yes=True, no=True
         )
@@ -3159,6 +3239,8 @@ def build_and_show(rows, nb_absent, nb_diff, nb_ok, nb_str_seul, nb_invalid,
             r_a, r_b, r_c, r_d, r_e, r_f,
             r_a, r_c + r_d
         )
+        if nb_g:
+            result_msg += u"\n\n" + MSG_RESULT_G.format(_SYNC_EXTRA["g"], nb_g)
         if ws_not_found:
             result_msg += u"\n\n" + MSG_WORKSET_NOT_FOUND.format(TARGET_WORKSET_NAME)
 
