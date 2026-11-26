@@ -2,7 +2,7 @@
 # =============================================================================
 # CONFIG
 # =============================================================================
-SCRIPT_VERSION = "1.9.1"
+SCRIPT_VERSION = "1.10.0"
 SCRIPT_AUTHOR  = "Tony VARIN"
 TOOL_NAME      = "FGH - Export IFC RES"
 # =============================================================================
@@ -17,6 +17,9 @@ TOOL_NAME      = "FGH - Export IFC RES"
 # Lancer dans la maquette RES pour le premier, dans la maquette STR pour le
 # second. Une vue 3D temporaire filtre ce qui part : tout est annule apres
 # l'export, la maquette n'est pas modifiee. Voir lib/fgh_res.py.
+# 1.10.0 : les zones de definition de la maquette RES partent dans l'IFC des
+#          reservations (jeu STR_FGH_ZONES sur IfcProject, voir lib/fgh_res.py),
+#          pour poser une boite de coupe par zone sur la page /fgh/rsv/.
 # 1.9.1 : l'ADN est aussi ecrit sous le nom CONTROL_NE_PAS_TOUCHER dans le jeu
 #         STR_FGH_RES (parametre commun avec un export IFC ordinaire).
 # 1.9.0 : deux cases filtrent les reservations selon PVA_RES_DEM_ResSTR
@@ -290,8 +293,17 @@ try:
         quand = datetime.datetime.now().strftime("%d/%m/%Y %H:%M")
         par_eid = dict((u"{}".format(fgh_res.id_int(e.Id)), fgh_res.donnees(doc, e, quand)) for e in res)
         n, absents = fgh_res.injecter(chemin, par_eid)
+        try:
+            nb_zones = fgh_res.injecter_zones(chemin, fgh_res.zones_definition(doc), fgh_res.reperes_recalage(res))
+        except Exception as ex_z:
+            nb_zones = -1
+            messages_zones = u"{}".format(ex_z)
         sans_adn = sum(1 for e in res if not fgh_res.adn(e))
         txt = controle(len(res), len(par_eid) - len(absents)) + u"\n   Fichier : {}".format(os.path.basename(chemin))
+        if nb_zones > 0:
+            txt += u"\n   {} zone(s) de définition ajoutée(s) pour la page web".format(nb_zones)
+        elif nb_zones < 0:
+            txt += u"\n   Zones de définition non ajoutées : {}".format(messages_zones)
         n_sup = len(fgh_res.reservations(doc, avec_supprimees=True)) - len(res)
         if n_sup:
             txt += u"\n   {} supprimée(s) ({} coché) non exportée(s)".format(n_sup, fgh_res.SUPPRIME_PARAM)

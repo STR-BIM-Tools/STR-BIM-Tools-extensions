@@ -24,16 +24,20 @@
 # =============================================================================
 
 import io
+import json
+import math
 import random
 import re
 
 from Autodesk.Revit.DB import (FamilyInstance, FilteredElementCollector,
-                               StorageType, Element, ModelPathUtils)
+                               StorageType, Element, ModelPathUtils,
+                               BuiltInCategory, Options, Line)
 
 FORMAT = u"STR_FGH_RES_VALIDATION"
 FORMAT_VERSION = 1
 PSET_NOM = u"STR_FGH_RES"
 PSET_STR = u"STR_FGH_STR"          # phase des elements de la structure light
+PSET_ZONES = u"STR_FGH_ZONES"      # zones de definition de la maquette RES (sur IfcProject)
 PAGE_WEB = u"https://str-bim-tools.com/fgh/"
 
 FAMILY_PREFIX = u"FGH_RES"
@@ -431,3 +435,105 @@ def injecter(chemin_ifc, par_eid):
     fin(lignes)
     absents = sorted((t for t in par_eid if t not in groupes), key=lambda t: (len(t), t))
     return len(cibles), absents
+
+
+# =============================================================================
+# Zones de definition (Scope Boxes) de la maquette RES
+# =============================================================================
+# Demande de Tony (26.11.2026) : la page /fgh/rsv/ pose une boite de coupe sur
+# une zone de definition. Les zones partent dans l'IFC des reservations, jeu
+# STR_FGH_ZONES rattache a IfcProject, propriete « Zones » = texte JSON :
+#   { "version": 1, "unite": "pied", "repere": "coordonnees internes Revit",
+#     "zones":   [ { nom, id, c: [x, y, z], h: [hx, hy, hz], a } ],
+#     "reperes": [ { eid, p: [x, y, z] } ] }
+# c = centre, h = demi-longueurs dans le repere de la zone, a = rotation en
+# plan (radians) de son premier axe. Coordonnees internes : l'IFC est exporte
+# en coordonnees partagees, dont la conversion depend des reglages d'export.
+# La page recale donc les zones sur les « reperes » : centres de quelques
+# reservations de l'export, retrouvees dans l'IFC par leur ElementId.
+
+def _r(v, n=4):
+    return round(float(v), n)
+
+
+def zones_definition(doc):
+    """Zones de definition du document : [{nom, id, c, h, a}] en pieds, coordonnees internes."""
+    out = []
+    for z in FilteredElementCollector(doc).OfCategory(BuiltInCategory.OST_VolumeOfInterest) \
+            .WhereElementIsNotElementType().ToElements():
+        pts, a = [], None
+        try:
+            for g in z.get_Geometry(Options()):
+                if isinstance(g, Line):
+                    p0, p1 = g.GetEndPoint(0), g.GetEndPoint(1)
+                    pts += [p0, p1]
+                    dx, dy, dz = p1.X - p0.X, p1.Y - p0.Y, p1.Z - p0.Z
+                    if a is None and abs(dz) < 1.0e-6 and math.hypot(dx, dy) > 1.0e-6:
+                        a = math.atan2(dy, dx) % (math.pi / 2.0)
+        except Exception:
+            continue
+        if len(pts) < 2:
+            continue
+        a = a or 0.0
+        c, s = math.cos(a), math.sin(a)
+        us = [c * p.X + s * p.Y for p in pts]
+        vs = [-s * p.X + c * p.Y for p in pts]
+        zs = [p.Z for p in pts]
+        uc, vc = (min(us) + max(us)) / 2.0, (min(vs) + max(vs)) / 2.0
+        out.append({u"nom": nom(z), u"id": id_int(z.Id),
+                    u"c": [_r(c * uc - s * vc), _r(s * uc + c * vc), _r((min(zs) + max(zs)) / 2.0)],
+                    u"h": [_r((max(us) - min(us)) / 2.0), _r((max(vs) - min(vs)) / 2.0), _r((max(zs) - min(zs)) / 2.0)],
+                    u"a": _r(a, 8)})
+    out.sort(key=lambda d: d[u"nom"].lower())
+    return out
+
+
+def reperes_recalage(elements, nb=6):
+    """Centres (pieds, coordonnees internes) de reservations eloignees les unes des autres :
+    les extremes en X, en Y et sur les deux diagonales."""
+    pts = []
+    for e in elements:
+        try:
+            bb = e.get_BoundingBox(None)
+            if bb is None:
+                continue
+            pts.append((u"{}".format(id_int(e.Id)),
+                        [(bb.Min.X + bb.Max.X) / 2.0, (bb.Min.Y + bb.Max.Y) / 2.0, (bb.Min.Z + bb.Max.Z) / 2.0]))
+        except Exception:
+            pass
+    if len(pts) < 2:
+        return []
+    choix = []
+    for f in (lambda q: q[0], lambda q: -q[0], lambda q: q[1], lambda q: -q[1],
+              lambda q: q[0] + q[1], lambda q: q[0] - q[1]):
+        eid, p = min(pts, key=lambda t: f(t[1]))
+        if eid not in [x[0] for x in choix]:
+            choix.append((eid, p))
+    return [{u"eid": eid, u"p": [_r(v) for v in p]} for eid, p in choix[:nb]]
+
+
+def injecter_zones(chemin_ifc, zones, reperes):
+    """Ajoute le jeu STR_FGH_ZONES a IfcProject. Retourne le nombre de zones ecrites (0 si aucune
+    zone ou IfcProject introuvable)."""
+    if not zones:
+        return 0
+    lignes, _cibles, ent, fin = _lire_cibles(chemin_ifc, {})
+    proj = owner = None
+    rx = re.compile(r"^#(\d+)\s*=\s*IFCPROJECT\s*\((.*)\)\s*;\s*$")
+    for ligne in lignes:
+        if ligne.startswith(u"#") and u"IFCPROJECT" in ligne:
+            m = rx.match(ligne.strip())
+            if m:
+                a = _arguments(m.group(2))
+                proj, owner = int(m.group(1)), (a[1] if len(a) > 1 else u"$") or u"$"
+                break
+    if proj is None:
+        return 0
+    doc = {u"version": 1, u"unite": u"pied", u"repere": u"coordonnees internes Revit",
+           u"zones": zones, u"reperes": reperes}
+    txt = json.dumps(doc, ensure_ascii=False, separators=(",", ":"))
+    prop = ent(u"IFCPROPERTYSINGLEVALUE({},$,IFCTEXT({}),$)".format(chaine_step(u"Zones"), chaine_step(txt)))
+    pset = ent(u"IFCPROPERTYSET({},{},{},$,(#{}))".format(chaine_step(guid_ifc()), owner, chaine_step(PSET_ZONES), prop))
+    ent(u"IFCRELDEFINESBYPROPERTIES({},{},$,$,(#{}),#{})".format(chaine_step(guid_ifc()), owner, proj, pset))
+    fin(lignes)
+    return len(zones)
